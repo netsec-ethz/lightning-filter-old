@@ -1,0 +1,2 @@
+CBCMAC = ~25 cycles
+CMAC = ~1900 cycles
