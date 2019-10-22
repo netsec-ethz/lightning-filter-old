@@ -11,7 +11,7 @@ To run:
 2. Run file by calling: go run metrics_exporter.go
 3. Abort with Ctrl+C at any time.
 
-In order to modify th export socket or the UNIX port to listen on the source file must be modified.
+In order to modify the export socket or the UNIX port to listen on the source file must be modified.
 
 In oder to export new metrics:
 1. Add the new variable (see Prometheus doc or copy & modify existing variable)

@@ -275,7 +275,7 @@ static void test_check_and_fetch_grace_suspicious_long(void **state)
 	res = check_and_fetch(node, srcIA);
 	assert_true(res == 0);
 
-	node->key_store->drkeys[1]->epoch_end = node->key_store->drkeys[1]->epoch_end * 2;
+	node->key_store->drkeys[1]->epoch_end *= 2;
 
 	sleep(KEY_GRACE_PERIOD + 1);
 
