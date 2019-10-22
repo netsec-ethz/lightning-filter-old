@@ -1,4 +1,4 @@
-noTests=100000 # number of test cases per block size
+noTests=10000 # number of test cases per block size
 maxNoBlocks=4 # eg 4 --> tests 1, 2, 3 and 4 blocks
 
 for j in $(seq 1 $maxNoBlocks)
@@ -29,4 +29,3 @@ do
 
 	echo "$successful / $noTests successful for $j blocks"
 done
-

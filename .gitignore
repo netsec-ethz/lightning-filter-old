@@ -2,4 +2,6 @@
 *settings
 *.scproject
 *.project
+*.o
+*.a
 src/build/

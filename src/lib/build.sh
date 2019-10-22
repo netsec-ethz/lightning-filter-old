@@ -1,8 +1,9 @@
 #!/bin/bash
+set -e
 
 pushd .
-rm *.o libds.a
-gcc -I$(pwd)/libcuckoofilter/include -L$(pwd)/libcuckoofilter -m64 -c ds.c -o ds.o -O3 -g
+rm -f *.o libds.a
+gcc -I./libcuckoofilter/include -L./libcuckoofilter -m64 -c ds.c -o ds.o -O3
 ar cru libds.a ds.o
-ar cru libds.a $(pwd)/libcuckoofilter/cuckoo_filter.o
+ar cru libds.a ./libcuckoofilter/cuckoo_filter.o
 popd

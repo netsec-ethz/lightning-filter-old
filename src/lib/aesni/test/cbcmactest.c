@@ -89,7 +89,7 @@ int main(int argc, char *argv[])
 	for (int i = 0; i < 16; i++) {
 		tmp = 0;
 		if (sscanf(argv[1],"%2x", &tmp) != 1) {
-			printf("Byte %d: Illegal byte value '%02s' in input\n", i+1, argv[2]);
+			printf("Byte %d: Illegal byte value '%s' in input\n", i+1, argv[2]);
 			break;
 		}
 		key[i] = (char) tmp;
@@ -109,7 +109,7 @@ int main(int argc, char *argv[])
 	for (int i = 0; i < numBytes; i++) {
 		tmp = 0;
 		if (sscanf(argv[2],"%2x", &tmp) != 1) {
-			printf("Byte %d: Illegal byte value '%02s'\n", i+1, argv[2]);
+			printf("Byte %d: Illegal byte value '%s'\n", i+1, argv[2]);
 			break;
 		}
 		input[i] = (char) tmp;
