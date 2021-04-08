@@ -1,8 +1,11 @@
-#include <stdarg.h>
-#include <stdint.h>
-#include <stddef.h>
 #include <setjmp.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <unistd.h>
+
 #include <cmocka.h>
+
 
 #include "key_manager.h"
 
@@ -13,7 +16,7 @@ static void test_in_epoch_in(void **state)
 	}
 	int res;
 	uint32_t val_time;
-	delegation_secret *key = malloc(sizeof(key_storage));
+	delegation_secret *key = malloc(sizeof *key);
 
 	val_time = time(NULL);
 	key->epoch_begin = val_time - 1;
@@ -30,7 +33,7 @@ static void test_in_epoch_out_before(void **state)
 	}
 	int res;
 	uint32_t val_time;
-	delegation_secret *key = malloc(sizeof(key_storage));
+	delegation_secret *key = malloc(sizeof *key);
 
 	val_time = time(NULL);
 	key->epoch_begin = val_time + 1;
@@ -47,7 +50,7 @@ static void test_in_epoch_out_after(void **state)
 	}
 	int res;
 	uint32_t val_time;
-	delegation_secret *key = malloc(sizeof(key_storage));
+	delegation_secret *key = malloc(sizeof *key);
 
 	val_time = time(NULL);
 	key->epoch_begin = val_time - 2;
@@ -64,7 +67,7 @@ static void test_in_epoch_border_begin(void **state)
 	}
 	int res;
 	uint32_t val_time;
-	delegation_secret *key = malloc(sizeof(key_storage));
+	delegation_secret *key = malloc(sizeof *key);
 
 	val_time = time(NULL);
 	key->epoch_begin = val_time;
@@ -81,7 +84,7 @@ static void test_in_epoch_border_end(void **state)
 	}
 	int res;
 	uint32_t val_time;
-	delegation_secret *key = malloc(sizeof(key_storage));
+	delegation_secret *key = malloc(sizeof *key);
 
 	val_time = time(NULL);
 	key->epoch_begin = val_time - 1;
@@ -100,7 +103,7 @@ static void test_get_DRKey(void **state)
 	int res;
 	uint32_t val_time;
 	uint64_t srcIA;
-	delegation_secret *key = malloc(sizeof(key_storage));
+	delegation_secret *key = malloc(sizeof *key);
 
 	val_time = time(NULL);
 	srcIA = 1;
@@ -124,7 +127,7 @@ static void test_get_DRKey_mock_AS(void **state)
 	int res;
 	uint32_t val_time;
 	uint64_t srcIA;
-	delegation_secret *key = malloc(sizeof(key_storage));
+	delegation_secret *key = malloc(sizeof *key);
 
 	val_time = time(NULL);
 	srcIA = 1;
@@ -148,7 +151,7 @@ static void test_get_DRKey_mock_epoch(void **state)
 	int res;
 	uint32_t val_time;
 	uint64_t srcIA;
-	delegation_secret *key = malloc(sizeof(key_storage));
+	delegation_secret *key = malloc(sizeof *key);
 
 	val_time = time(NULL);
 	srcIA = 1;
@@ -173,9 +176,9 @@ static void test_get_DRKey_mock_key_state(void **state)
 	int res;
 	uint32_t val_time;
 	uint64_t srcIA;
-	delegation_secret *key = malloc(sizeof(key_storage));
+	delegation_secret *key = malloc(sizeof *key);
 
-	char *key_1 = "aaaabbbbccccdddd";
+	const char *key_1 = "aaaabbbbccccdddd";
 	//char *key_2 = "eeeeffffgggghhhh";
 
 	val_time = time(NULL);
@@ -203,8 +206,8 @@ static void test_check_and_fetch(void **state)
 
 	int res;
 	uint64_t srcIA;
-	key_store_node* node = malloc(sizeof(key_store_node));
-	node->key_store = malloc(sizeof(key_storage));
+	key_store_node *node = malloc(sizeof *node);
+	node->key_store = malloc(sizeof *node->key_store);
 	srcIA = 1;
 
 	assert_null(node->key_store->drkeys[0]);
@@ -231,8 +234,8 @@ static void test_check_and_fetch_grace_period(void **state)
 
 	int res;
 	uint64_t srcIA;
-	key_store_node* node = malloc(sizeof(key_store_node));
-	node->key_store = malloc(sizeof(key_storage));
+	key_store_node *node = malloc(sizeof *node);
+	node->key_store = malloc(sizeof *node->key_store);
 	srcIA = 1;
 
 	assert_null(node->key_store->drkeys[0]);
@@ -264,8 +267,8 @@ static void test_check_and_fetch_grace_suspicious_long(void **state)
 
 	int res;
 	uint64_t srcIA;
-	key_store_node* node = malloc(sizeof(key_store_node));
-	node->key_store = malloc(sizeof(key_storage));
+	key_store_node *node = malloc(sizeof *node);
+	node->key_store = malloc(sizeof *node->key_store);
 	srcIA = 1;
 
 	assert_null(node->key_store->drkeys[0]);
@@ -275,7 +278,7 @@ static void test_check_and_fetch_grace_suspicious_long(void **state)
 	res = check_and_fetch(node, srcIA);
 	assert_true(res == 0);
 
-	node->key_store->drkeys[1]->epoch_end = node->key_store->drkeys[1]->epoch_end * 2;
+	node->key_store->drkeys[1]->epoch_end *= 2;
 
 	sleep(KEY_GRACE_PERIOD + 1);
 
@@ -291,8 +294,8 @@ static void test_check_and_fetch_grace_suspicious_short(void **state)
 
 	int res;
 	uint64_t srcIA;
-	key_store_node* node = malloc(sizeof(key_store_node));
-	node->key_store = malloc(sizeof(key_storage));
+	key_store_node *node = malloc(sizeof *node);
+	node->key_store = malloc(sizeof *node->key_store);
 	srcIA = 1;
 
 	assert_null(node->key_store->drkeys[0]);

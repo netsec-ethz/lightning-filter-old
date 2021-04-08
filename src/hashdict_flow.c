@@ -20,9 +20,9 @@ uint64_t splitmix_flow(uint64_t x) {
 }
 
 struct keynode_flow *keynode_new_flow(uint64_t key, dos_counter *value) {
-	struct keynode_flow *node = malloc(sizeof(struct keynode_flow));
-	node->key = key;
+	struct keynode_flow *node = malloc(sizeof *node);
 	node->next = NULL;
+	node->key = key;
 	node->counters = value;
 	return node;
 }
@@ -37,18 +37,14 @@ void keynode_delete_flow(struct keynode_flow *node) {
 }
 
 struct dictionary_flow* dic_new_flow(int initial_size) {
-	struct dictionary_flow* dic = malloc(sizeof(struct dictionary_flow));
+	struct dictionary_flow *dic = malloc(sizeof *dic);
 	if (initial_size == 0) initial_size = 1024;
 	dic->length = initial_size;
 	dic->count = 0;
 	dic->value = NULL;
-	dic->table = calloc(sizeof(struct keynode_flow*), initial_size);
+	dic->table = calloc(sizeof *dic->table, dic->length);
 	dic->growth_treshold = 2.0;
 	dic->growth_factor = 2;
-
-	for (int i = 0; i < initial_size; i++){
-		dic->table[i] = NULL;
-	}
 	return dic;
 }
 
@@ -78,8 +74,8 @@ void dic_reinsert_when_resizing_flow(struct dictionary_flow* dic, struct keynode
 void dic_resize_flow(struct dictionary_flow* dic, int newsize) {
 	int o = dic->count;
 	struct keynode_flow **old = dic->table;
-	dic->table = calloc(sizeof(struct keynode_flow*), newsize);
 	dic->length = newsize;
+	dic->table = calloc(sizeof *dic->table, dic->length);
 	for (int i = 0; i < o; i++) {
 		struct keynode_flow *k = old[i];
 		while (k) {
@@ -134,7 +130,6 @@ int dic_find_flow(struct dictionary_flow* dic, uint64_t key) {
 		k = k->next;
 	}
 	return 0;
-
 }
 
 int dic_remove_flow(struct dictionary_flow* dic, uint64_t key) {

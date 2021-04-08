@@ -32,7 +32,7 @@ unsigned int murmurhash(const void * key, int len, const unsigned int seed)
 
 	while(len >= 4)
 	{
-		unsigned int k = *(unsigned int *)data;
+		unsigned int k = *(const unsigned int *)data;
 
 		k *= m;
 		k ^= k >> r;

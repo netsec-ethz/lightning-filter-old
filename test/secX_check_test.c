@@ -13,12 +13,13 @@ static void test_copy_host_addrs(void **state)
 		state = NULL;
 	}
 
-	unsigned char * packet = "\x00\x41\x00\x58\x07\x04\x05\xde\x00\x2f\x00\x00\x00\x00\x47\x47" \
-			"\x00\x00\x00\x00\x00\x00\x42\x42\x0a\x00\x00\x2f\x0a\x00\x00\x2a" \
-			"\x00\x00\x00\x01\x47\x00\x2a\x02\x00\x3f\x00\x10\x02\x1f\xc2\x2f" \
-			"\x00\x3f\x00\x00\x03\x1b\xa3\x97\x11\x03\x02\x00\x00\x00\x01\x47" \
-			"\x61\x61\x61\x61\x62\x62\x62\x62\x63\x63\x63\x63\x64\x64\x64\x64" \
-			"\x27\x3a\x27\x3f\x00\x08\x00\x00";
+	unsigned char packet[] = {
+			0x00, 0x41, 0x00, 0x58, 0x07, 0x04, 0x05, 0xde, 0x00, 0x2f, 0x00, 0x00, 0x00, 0x00, 0x47, 0x47,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x42, 0x42, 0x0a, 0x00, 0x00, 0x2f, 0x0a, 0x00, 0x00, 0x2a,
+			0x00, 0x00, 0x00, 0x01, 0x47, 0x00, 0x2a, 0x02, 0x00, 0x3f, 0x00, 0x10, 0x02, 0x1f, 0xc2, 0x2f,
+			0x00, 0x3f, 0x00, 0x00, 0x03, 0x1b, 0xa3, 0x97, 0x11, 0x03, 0x02, 0x00, 0x00, 0x00, 0x01, 0x47,
+			0x61, 0x61, 0x61, 0x61, 0x62, 0x62, 0x62, 0x62, 0x63, 0x63, 0x63, 0x63, 0x64, 0x64, 0x64, 0x64,
+			0x27, 0x3a, 0x27, 0x3f, 0x00, 0x08, 0x00, 0x00};
 
 	SCIONCommonHeader *sch = (SCIONCommonHeader *)packet;
 	unsigned char *scion_packet = packet;
@@ -47,18 +48,19 @@ static void test_derive_lvl2DRKey(void **state)
 		state = NULL;
 	}
 
-	unsigned char  packet[88] = "\x00\x41\x00\x58\x07\x04\x05\xde\x00\x2f\x00\x00\x00\x00\x47\x47" \
-			"\x00\x00\x00\x00\x00\x00\x42\x42\x0a\x00\x00\x2f\x0a\x00\x00\x2a" \
-			"\x00\x00\x00\x01\x47\x00\x2a\x02\x00\x3f\x00\x10\x02\x1f\xc2\x2f" \
-			"\x00\x3f\x00\x00\x03\x1b\xa3\x97\x11\x03\x02\x00\x00\x00\x01\x47" \
-			"\x61\x61\x61\x61\x62\x62\x62\x62\x63\x63\x63\x63\x64\x64\x64\x64" \
-			"\x27\x3a\x27\x3f\x00\x08\x00\x00";
+	unsigned char packet[] = {
+			0x00, 0x41, 0x00, 0x58, 0x07, 0x04, 0x05, 0xde, 0x00, 0x2f, 0x00, 0x00, 0x00, 0x00, 0x47, 0x47,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x42, 0x42, 0x0a, 0x00, 0x00, 0x2f, 0x0a, 0x00, 0x00, 0x2a,
+			0x00, 0x00, 0x00, 0x01, 0x47, 0x00, 0x2a, 0x02, 0x00, 0x3f, 0x00, 0x10, 0x02, 0x1f, 0xc2, 0x2f,
+			0x00, 0x3f, 0x00, 0x00, 0x03, 0x1b, 0xa3, 0x97, 0x11, 0x03, 0x02, 0x00, 0x00, 0x00, 0x01, 0x47,
+			0x61, 0x61, 0x61, 0x61, 0x62, 0x62, 0x62, 0x62, 0x63, 0x63, 0x63, 0x63, 0x64, 0x64, 0x64, 0x64,
+			0x27, 0x3a, 0x27, 0x3f, 0x00, 0x08, 0x00, 0x00};
 
 	SCIONCommonHeader *sch = (SCIONCommonHeader *)packet;
 	unsigned char *scion_packet = packet;
 	unsigned char host_addr_buffer[32] = "";
 	unsigned char key_buffer[16] = "";
-	keystruct *keys = malloc(sizeof(keystruct));
+	keystruct *keys = malloc(sizeof *keys);
 	unsigned char roundkey[196] = ""; // stack smashing
 	unsigned char computed_cmac[16] = "";
 	unsigned char SX_MAC[16] = "";
@@ -68,8 +70,8 @@ static void test_derive_lvl2DRKey(void **state)
 	uint32_t now = time(NULL);
 	uint32_t next_time;
 
-	key_storage *key_storage = malloc(sizeof(key_storage));
-	key_store_node* key_store_node = malloc(sizeof(key_store_node));
+	key_storage *key_storage = malloc(sizeof *key_storage);
+	key_store_node *key_store_node = malloc(sizeof *key_store_node);
 	key_store_node->index = 0;
 	key_store_node->key_store = key_storage;
 
@@ -81,11 +83,11 @@ static void test_derive_lvl2DRKey(void **state)
 	dic_find(dict,as);
 	key_storage = dict->value->key_store;
 
-	delegation_secret *key = malloc(sizeof(key_storage));
+	delegation_secret *key = malloc(sizeof *key);
 	get_DRKey(now, as, key);
 	next_time = key->epoch_end;
 	key_storage->drkeys[0] = key;
-	key = malloc(sizeof(key_storage));
+	key = malloc(sizeof *key);
 	get_DRKey(next_time, as, key);
 	key_storage->drkeys[1] = key;
 
@@ -104,29 +106,30 @@ static void test_compute_cmac(void **state)
 		state = NULL;
 	}
 
-	unsigned char  packet[88] = "\x00\x41\x00\x58\x07\x04\x05\xde\x00\x2f\x00\x00\x00\x00\x47\x47" \
-			"\x00\x00\x00\x00\x00\x00\x42\x42\x0a\x00\x00\x2f\x0a\x00\x00\x2a" \
-			"\x00\x00\x00\x01\x47\x00\x2a\x02\x00\x3f\x00\x10\x02\x1f\xc2\x2f" \
-			"\x00\x3f\x00\x00\x03\x1b\xa3\x97\x11\x03\x02\x00\x00\x00\x01\x47" \
-			"\x61\x61\x61\x61\x62\x62\x62\x62\x63\x63\x63\x63\x64\x64\x64\x64" \
-			"\x27\x3a\x27\x3f\x00\x08\x00\x00";
+	unsigned char packet[] = {
+			0x00, 0x41, 0x00, 0x58, 0x07, 0x04, 0x05, 0xde, 0x00, 0x2f, 0x00, 0x00, 0x00, 0x00, 0x47, 0x47,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x42, 0x42, 0x0a, 0x00, 0x00, 0x2f, 0x0a, 0x00, 0x00, 0x2a,
+			0x00, 0x00, 0x00, 0x01, 0x47, 0x00, 0x2a, 0x02, 0x00, 0x3f, 0x00, 0x10, 0x02, 0x1f, 0xc2, 0x2f,
+			0x00, 0x3f, 0x00, 0x00, 0x03, 0x1b, 0xa3, 0x97, 0x11, 0x03, 0x02, 0x00, 0x00, 0x00, 0x01, 0x47,
+			0x61, 0x61, 0x61, 0x61, 0x62, 0x62, 0x62, 0x62, 0x63, 0x63, 0x63, 0x63, 0x64, 0x64, 0x64, 0x64,
+			0x27, 0x3a, 0x27, 0x3f, 0x00, 0x08, 0x00, 0x00};
 
 	SCIONCommonHeader *sch = (SCIONCommonHeader *)packet;
 	unsigned char *scion_packet = packet;
 	unsigned char host_addr_buffer[32] = "";
 	unsigned char key_buffer[16] = "";
-	keystruct *keys = malloc(sizeof(keystruct));
+	keystruct *keys = malloc(sizeof *keys);
 	unsigned char roundkey[196] = ""; // (unsigned char*)malloc_aligned(16, 10*16*sizeof(char));
 	unsigned char computed_cmac[16] = "";
-	unsigned char SX_MAC[16] = "\x68\xbf\x9b\x69\x9c\xb9\xac\x01\x8b\x08\xb8\x3d\xef\xfe\x7a\x94";
+	unsigned char SX_MAC[] = {0x68, 0xbf, 0x9b, 0x69, 0x9c, 0xb9, 0xac, 0x01, 0x8b, 0x08, 0xb8, 0x3d, 0xef, 0xfe, 0x7a, 0x94};
 	uint32_t total_len = 88;
 
 	uint64_t as = be64toh(*((uint64_t*)(scion_packet + 16)));
 	uint32_t now = time(NULL);
 	uint32_t next_time;
 
-	key_storage *key_storage = malloc(sizeof(key_storage));
-	key_store_node* key_store_node = malloc(sizeof(key_store_node));
+	key_storage *key_storage = malloc(sizeof *key_storage);
+	key_store_node *key_store_node = malloc(sizeof *key_store_node);
 	key_store_node->index = 0;
 	key_store_node->key_store = key_storage;
 
@@ -138,11 +141,11 @@ static void test_compute_cmac(void **state)
 	dic_find(dict,as);
 	key_storage = dict->value->key_store;
 
-	delegation_secret *key = malloc(sizeof(key_storage));
+	delegation_secret *key = malloc(sizeof *key);
 	get_DRKey(now, as, key);
 	next_time = key->epoch_end;
 	key_storage->drkeys[0] = key;
-	key = malloc(sizeof(key_storage));
+	key = malloc(sizeof *key);
 	get_DRKey(next_time, as, key);
 	key_storage->drkeys[1] = key;
 

@@ -12,9 +12,9 @@
 scionfwd_fast_table* cuckoo_table_init(uint32_t size) {
   // allocate table
   scionfwd_fast_table *table;
-  table = calloc(1, sizeof(scionfwd_fast_table));
-  table->records = calloc(size, sizeof(record));
+  table = calloc(1, sizeof *table);
   table->size = size;
+  table->records = calloc(table->size, sizeof *table->records);
 
   // set two pseudorandom seeds
   srand(time(NULL));
@@ -66,7 +66,7 @@ void scionfwd_fast_table_insert(scionfwd_fast_table *table, void* value) {
 
 void scionfwd_fast_table_reset(scionfwd_fast_table *table) {
   record * temp_records = table->records; 
-  table->records = calloc(table->size, sizeof(record));
+  table->records = calloc(table->size, sizeof *table->records);
   free(temp_records);
 
   // set new pseudorandom seeds

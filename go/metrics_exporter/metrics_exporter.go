@@ -17,14 +17,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-/* IPC SOCKET TO LISTEN TO */
+/* IPC socket to listen on */
 const SockAddr = "/tmp/echo.sock"
 
 /* Prometheus export port 8080 */
-
-var (
-	addr = flag.String("listen-address", ":8080", "The address to listen on for HTTP requests.")
-)
+var addr = flag.String("listen-address", ":8080", "The address to listen on for HTTP requests.")
 
 var KeyRolloverCount = prometheus.NewGaugeVec(
 	prometheus.GaugeOpts{
@@ -262,7 +259,6 @@ func parseKeyStats(keyStat []string) {
 		"epoch_end": keyStat[4]}
 	KeyASInfo.With(labels).Set(1)
 	KeyInfo.WithLabelValues(keyStat[6]).Set(convert(keyStat[5]))
-
 }
 
 func parseCoreStats(coreStat []string) {
@@ -275,7 +271,6 @@ func parseCoreStats(coreStat []string) {
 	CoreSecXFailCount.WithLabelValues(coreStat[1]).Set(convert(coreStat[6]))
 	CoreBloomFilterHitCount.WithLabelValues(coreStat[1]).Set(convert(coreStat[7]))
 	CoreBloomFilterMissCount.WithLabelValues(coreStat[1]).Set(convert(coreStat[8]))
-
 }
 
 func parsePortStats(portStat []string) {
@@ -323,7 +318,6 @@ func parseSetUpPortStats(ips []string) {
 		"rx_queue_offload_capa": ips[17], "tx_queue_offload_capa": ips[18], "reta_size": ips[19],
 		"hash_key_size": ips[20], "flow_type_rss_offloads": ips[21], "speed_capa": ips[22], "dev_capa": ips[23]}
 	PortInfo.With(labels).Add(1)
-
 }
 
 func echorrServer(c net.Conn) {
@@ -333,9 +327,6 @@ func echorrServer(c net.Conn) {
 }
 
 func init_prometheus() {
-	fmt.Printf("starting promehteus handle\n")
-
-	fmt.Printf("register values\n")
 	prometheus.MustRegister(CoreRxPacketCount)
 	prometheus.MustRegister(CoreTxBypassPacketCount)
 	prometheus.MustRegister(CoreTxFirewallPacketCount)
@@ -365,7 +356,6 @@ func init_prometheus() {
 
 	http.Handle("/metrics", promhttp.Handler())
 	log.Fatal(http.ListenAndServe(*addr, nil))
-
 }
 
 func ipc_main() {
@@ -374,7 +364,6 @@ func ipc_main() {
 	}
 
 	l, err := net.Listen("unix", SockAddr)
-	fmt.Printf("Started listening\n")
 	if err != nil {
 		log.Fatal("listen error:", err)
 	}
@@ -391,10 +380,8 @@ func ipc_main() {
 		go echoServer(conn)
 	}
 }
-func main() {
 
-	fmt.Printf("Starting service\n")
+func main() {
 	go init_prometheus()
 	ipc_main()
-
 }

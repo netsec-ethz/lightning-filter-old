@@ -23,9 +23,9 @@ uint64_t splitmix(uint64_t x) {
 
 
 struct keynode *keynode_new(uint64_t key, key_store_node *value) {
-	struct keynode *node = malloc(sizeof(struct keynode));
-	node->key = key;
+	struct keynode *node = malloc(sizeof *node);
 	node->next = NULL;
+	node->key = key;
 	node->key_store = value;
 	return node;
 }
@@ -42,18 +42,14 @@ void keynode_delete(struct keynode *node) {
 
 
 struct dictionary* dic_new(int initial_size) {
-	struct dictionary* dic = malloc(sizeof(struct dictionary));
+	struct dictionary *dic = malloc(sizeof *dic);
 	if (initial_size == 0) initial_size = 1024;
 	dic->length = initial_size;
 	dic->count = 0;
 	dic->value = NULL;
-	dic->table = calloc(sizeof(struct keynode*), initial_size);
+	dic->table = calloc(sizeof *dic->table, dic->length);
 	dic->growth_treshold = 2.0;
 	dic->growth_factor = 2;
-
-	for (int i = 0; i < initial_size; i++){
-		dic->table[i] = NULL;
-	}
 	return dic;
 }
 
@@ -86,8 +82,8 @@ void dic_reinsert_when_resizing(struct dictionary* dic, struct keynode *k2) {
 void dic_resize(struct dictionary* dic, int newsize) {
 	int o = dic->count;
 	struct keynode **old = dic->table;
-	dic->table = calloc(sizeof(struct keynode*), newsize);
 	dic->length = newsize;
+	dic->table = calloc(sizeof *dic->table, dic->length);
 	for (int i = 0; i < o; i++) {
 		struct keynode *k = old[i];
 		while (k) {
@@ -144,7 +140,6 @@ int dic_find(struct dictionary* dic, uint64_t key) {
 		k = k->next;
 	}
 	return 0;
-
 }
 
 

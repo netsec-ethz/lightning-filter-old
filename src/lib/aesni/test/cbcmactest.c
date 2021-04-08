@@ -15,10 +15,10 @@
 
 void *malloc_aligned(size_t alignment, size_t bytes)
 {
-    const size_t total_size = bytes + (2 * alignment) + sizeof(size_t);
+    const size_t total_size = bytes + (2 * alignment) + sizeof (size_t);
 
     // use malloc to allocate the memory.
-    char *data = malloc(sizeof(char) * total_size);
+    char *data = malloc(sizeof (char) * total_size);
 
     if (data)
     {
@@ -26,7 +26,7 @@ void *malloc_aligned(size_t alignment, size_t bytes)
         const void * const data_start = data;
 
         // dedicate enough space to the book-keeping.
-        data += sizeof(size_t);
+        data += sizeof (size_t);
 
         // find a memory location with correct alignment. the alignment minus
         // the remainder of this mod operation is how many bytes forward we need
@@ -37,7 +37,7 @@ void *malloc_aligned(size_t alignment, size_t bytes)
         data += offset;
 
         // write the book-keeping.
-        size_t *book_keeping = (size_t*)(data - sizeof(size_t));
+        size_t *book_keeping = (size_t*)(data - sizeof (size_t));
         *book_keeping = (size_t)data_start;
     }
 
@@ -51,9 +51,9 @@ void free_aligned(void *raw_data)
         char *data = raw_data;
 
         // we have to assume this memory was allocated with malloc_aligned.
-        // this means the sizeof(size_t) bytes before data are the book-keeping
+        // this means the sizeof (size_t) bytes before data are the book-keeping
         // which points to the location we need to pass to free.
-        data -= sizeof(size_t);
+        data -= sizeof (size_t);
 
         // set data to the location stored in book-keeping.
         data = (char*)(*((size_t*)data));
@@ -66,8 +66,8 @@ void free_aligned(void *raw_data)
 unsigned char* aes_assembly_init(void *enc_key)
 {
     if (enc_key != NULL) {
-    	unsigned char* roundkey = (unsigned char*)malloc_aligned(16, 10*16*sizeof(char));
-    	memset(roundkey, 0, sizeof(10*16*sizeof(char)));
+    	unsigned char *roundkey = malloc_aligned(16, 10 * 16 * sizeof (unsigned char));
+    	memset(roundkey, 0, 10 * 16 * sizeof (unsigned char));
     	ExpandKey128(enc_key, roundkey);
     	return roundkey;
     }
@@ -83,13 +83,13 @@ int main(int argc, char *argv[])
 	}
 	
 	// parse key
-	unsigned char *key = (char*) calloc(16, sizeof(char));
+	unsigned char *key = calloc(16, sizeof (unsigned char));
 	int tmp; // to hold byte values
 	
 	for (int i = 0; i < 16; i++) {
 		tmp = 0;
 		if (sscanf(argv[1],"%2x", &tmp) != 1) {
-			printf("Byte %d: Illegal byte value '%02s' in input\n", i+1, argv[2]);
+			printf("Byte %d: Illegal byte value '%s' in input\n", i+1, argv[2]);
 			break;
 		}
 		key[i] = (char) tmp;
@@ -100,7 +100,7 @@ int main(int argc, char *argv[])
 	int len = strlen(argv[2]);
 	int numBytes = (len/2); // length of input
 
-	unsigned char *input = (char*) calloc(numBytes, sizeof(char));
+	unsigned char *input = calloc(numBytes, sizeof (unsigned char));
 	
 	if (input == 0){
 		printf("Cannot allocate memory");
@@ -109,7 +109,7 @@ int main(int argc, char *argv[])
 	for (int i = 0; i < numBytes; i++) {
 		tmp = 0;
 		if (sscanf(argv[2],"%2x", &tmp) != 1) {
-			printf("Byte %d: Illegal byte value '%02s'\n", i+1, argv[2]);
+			printf("Byte %d: Illegal byte value '%s'\n", i+1, argv[2]);
 			break;
 		}
 		input[i] = (char) tmp;

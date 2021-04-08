@@ -134,7 +134,7 @@ int bloom_init(struct bloom * bloom, int entries, double error)
 
   bloom->hashes = (int)ceil(0.693147180559945 * bloom->bpe);  // ln(2)
 
-  bloom->bf = (unsigned char *)calloc(bloom->bytes, sizeof(unsigned char));
+  bloom->bf = calloc(bloom->bytes, sizeof (unsigned char));
   if (bloom->bf == NULL) {
     return 1;
   }

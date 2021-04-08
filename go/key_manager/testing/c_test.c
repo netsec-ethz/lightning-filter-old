@@ -28,7 +28,7 @@ int main() {
     uint64_t src_ia;
     uint64_t dst_ia;
 
-    char *ptr = (char *) malloc(40 * sizeof (char));
+    char *ptr = malloc(40 * sizeof (char));
     int res;
     res = GetLvl1DRKey(key_type, val_time, srcIA, dstIA, ptr);
 
@@ -54,5 +54,5 @@ int main() {
         printf("%c",DRKey[i]);
     }
     printf("\n");
-    printf("test complete: %u\n", res);
+    printf("Test complete: %u\n", res);
 }

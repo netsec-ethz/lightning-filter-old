@@ -31,7 +31,7 @@ uint16_t scmp_checksum(uint8_t *buf)
     // SCMP Timestamp
     ptr = chk_add_chunk(input, ptr, 8);
     // Length in SCMP header includes header size, so subtract it.
-    payload_len = ntohs(scmp_l4->len) - sizeof(SCMPL4Header);
+    payload_len = ntohs(scmp_l4->len) - sizeof (SCMPL4Header);
     chk_add_chunk(input, ptr, payload_len);
 
     ret = checksum(input);
@@ -55,7 +55,7 @@ void update_scmp_checksum(uint8_t *buf)
  *               not present.
  */
 SCMPPayload *scmp_parse_payload(SCMPL4Header *scmp_hdr) {
-    SCMPPayload *pld = (SCMPPayload *)malloc(sizeof(SCMPPayload));
+    SCMPPayload *pld = malloc(sizeof *pld);
     void *ptr = scmp_hdr + 1;
     pld->meta = (SCMPMetaHeader *)ptr;
     ptr = pld->meta + 1;

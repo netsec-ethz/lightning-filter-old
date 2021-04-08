@@ -95,21 +95,21 @@ static void hashdict_find_node(void **state)
 
 	dict = dic_new(initial_size);
 
-	node = malloc(sizeof(struct key_store_node));
+	node = malloc(sizeof *node);
 	node->index = 0;
 	key = 0;
 	ret = dic_add(dict, key, node);
 	assert_true(ret == 0);
 	assert_true(dict->count == 1);
 
-	node = malloc(sizeof(struct key_store_node));
+	node = malloc(sizeof *node);
 	node->index = 1;
 	key = 1;
 	ret = dic_add(dict, key, node);
 	assert_true(ret == 0);
 	assert_true(dict->count == 2);
 
-	node = malloc(sizeof(struct key_store_node));
+	node = malloc(sizeof *node);
 	node->index = 2;
 	key = 2;
 	ret = dic_add(dict, key, node);
@@ -144,7 +144,7 @@ static void hashdict_delete_node(void **state)
 	dict = dic_new(initial_size);
 
 	// add node
-	node = malloc(sizeof(struct key_store_node));
+	node = malloc(sizeof *node);
 	node->index = 2;
 	key = 2;
 	ret = dic_add(dict, key, node);
@@ -186,7 +186,7 @@ static void hashdict_resize(void **state)
 	assert_true(dict->length == 1);
 
 	//add object to map
-	node = malloc(sizeof(struct key_store_node));
+	node = malloc(sizeof *node);
 	node->index = 0;
 	key = 0;
 	ret = dic_add(dict, key, node);
@@ -194,7 +194,7 @@ static void hashdict_resize(void **state)
 	assert_true(dict->count == 1);
 	assert_true(dict->length == 1);
 
-	node = malloc(sizeof(struct key_store_node));
+	node = malloc(sizeof *node);
 	node->index = 1;
 	key = 1;
 	ret = dic_add(dict, key, node);
@@ -203,7 +203,7 @@ static void hashdict_resize(void **state)
 	assert_true(dict->length == 1);
 
 	// add object to cause resize
-	node = malloc(sizeof(struct key_store_node));
+	node = malloc(sizeof *node);
 	node->index = 2;
 	key = 2;
 	ret = dic_add(dict, key, node);
@@ -212,7 +212,7 @@ static void hashdict_resize(void **state)
 	assert_true(dict->length == 1);
 
 	// add object to cause resize
-	node = malloc(sizeof(struct key_store_node));
+	node = malloc(sizeof *node);
 	node->index = 0;
 	key = 3;
 	ret = dic_add(dict, key, node);
@@ -243,22 +243,22 @@ static void hashdict_full(void **state)
 
 	dict = dic_new(initial_size);
 
-	node = malloc(sizeof(struct key_store_node));
+	node = malloc(sizeof *node);
 	node->index = 0;
 	key = 0;
 	ret = dic_add(dict, key, node);
 
-	node = malloc(sizeof(struct key_store_node));
+	node = malloc(sizeof *node);
 	node->index = 1;
 	key = 1;
 	ret = dic_add(dict, key, node);
 
-	node = malloc(sizeof(struct key_store_node));
+	node = malloc(sizeof *node);
 	node->index = 2;
 	key = 2;
 	ret = dic_add(dict, key, node);
 
-	node = malloc(sizeof(struct key_store_node));
+	node = malloc(sizeof *node);
 	node->index = 0;
 	key = 3;
 	ret = dic_add(dict, key, node);

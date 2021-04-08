@@ -158,10 +158,10 @@ void AES_CMAC ( unsigned char *rk, unsigned char *input, int length, unsigned ch
 
 void *malloc_aligned(size_t alignment, size_t bytes)
 {
-    const size_t total_size = bytes + (2 * alignment) + sizeof(size_t);
+    const size_t total_size = bytes + (2 * alignment) + sizeof (size_t);
 
     // use malloc to allocate the memory.
-    char *data = malloc(sizeof(char) * total_size);
+    char *data = malloc(sizeof (char) * total_size);
 
     if (data)
     {
@@ -169,7 +169,7 @@ void *malloc_aligned(size_t alignment, size_t bytes)
         const void * const data_start = data;
 
         // dedicate enough space to the book-keeping.
-        data += sizeof(size_t);
+        data += sizeof (size_t);
 
         // find a memory location with correct alignment. the alignment minus
         // the remainder of this mod operation is how many bytes forward we need
@@ -180,7 +180,7 @@ void *malloc_aligned(size_t alignment, size_t bytes)
         data += offset;
 
         // write the book-keeping.
-        size_t *book_keeping = (size_t*)(data - sizeof(size_t));
+        size_t *book_keeping = (size_t*)(data - sizeof (size_t));
         *book_keeping = (size_t)data_start;
     }
 
@@ -194,9 +194,9 @@ void free_aligned(void *raw_data)
         char *data = raw_data;
 
         // we have to assume this memory was allocated with malloc_aligned.
-        // this means the sizeof(size_t) bytes before data are the book-keeping
+        // this means the sizeof (size_t) bytes before data are the book-keeping
         // which points to the location we need to pass to free.
-        data -= sizeof(size_t);
+        data -= sizeof (size_t);
 
         // set data to the location stored in book-keeping.
         data = (char*)(*((size_t*)data));
@@ -209,8 +209,8 @@ void free_aligned(void *raw_data)
 unsigned char* aes_assembly_init(void *enc_key)
 {
     if (enc_key != NULL) {
-    	unsigned char* roundkey = (unsigned char*)malloc_aligned(16, 10*16*sizeof(char));
-    	memset(roundkey, 0, sizeof(10*16*sizeof(char)));
+    	unsigned char *roundkey = malloc_aligned(16, 10 * 16 * sizeof (unsigned char));
+    	memset(roundkey, 0, 10 * 16 * sizeof (unsigned char));
     	ExpandKey128(enc_key, roundkey);
     	return roundkey;
     }

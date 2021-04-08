@@ -47,11 +47,11 @@ uint16_t checksum(chk_input *in) {
  */
 chk_input *mk_chk_input(int total){
     chk_input *input;
-    input = (chk_input *)malloc(sizeof(chk_input));
+    input = malloc(sizeof *input);
     input->idx = 0;
     input->total = total;
-    input->len = (uint16_t *)malloc(sizeof(uint16_t) * input->total);
-    input->ptr = (uint8_t **)malloc(sizeof(uint8_t *) * input->total);
+    input->len = malloc(sizeof *input->len * input->total);
+    input->ptr = malloc(sizeof *input->ptr * input->total);
     return input;
 }
 

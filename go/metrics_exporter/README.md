@@ -1,17 +1,17 @@
-This subdirectory contain the metrics exporter.
-It is the interaface between the Lighning filter C application and
-the local Prometheus server.
+This subdirectory contains the metrics exporter.
+It is the interface between the Lightning Filter application and the local 
+Prometheus server.
 
-The application listens to the UNIX socket: "/tmp/echo.sock"
-and exports the prometheus data to port 8080
+The application listens on the UNIX socket: "/tmp/echo.sock" and exports 
+Prometheus data on port 8080.
 
 To run:
-1. Make sure that your local prometheus server is running and that prometheus
+1. Make sure that your local Prometheus server is running and that Prometheus
    is configured to listen to port 8080.
-2. Run file by calling: go run metrics_exporter.go
+2. Run metrics exporter by calling: go run metrics_exporter.go
 3. Abort with Ctrl+C at any time.
 
-In order to modify th export socket or the UNIX port to listen on the source file must be modified.
+In order to modify the export port or the UNIX socket to listen on the source file must be modified.
 
 In oder to export new metrics:
 1. Add the new variable (see Prometheus doc or copy & modify existing variable)

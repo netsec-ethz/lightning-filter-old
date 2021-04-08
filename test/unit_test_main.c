@@ -15,8 +15,6 @@
 
 int unit_test_main(void);
 
-
-
 int unit_test_main(void)
 {
 	const struct CMUnitTest tests[] = {

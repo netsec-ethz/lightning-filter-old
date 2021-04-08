@@ -27,7 +27,6 @@ int check_remaining_keys(key_storage *key_store, uint32_t current_time, uint8_t 
  * returns 0 on failure
  */
 int is_in_epoch(uint32_t val_time, delegation_secret *key){
-
 #if DEBUG_ENABLED
 	printf("timestamp %u, epoch start %u, epoch end %u ->", val_time, key->epoch_begin, key->epoch_end);
 #endif
@@ -65,7 +64,7 @@ int can_be_fetched(uint32_t current_time, uint32_t epoch_begin){
 int get_DRKey(uint32_t val_time, uint64_t srcIA, struct delegation_secret* key){
 
 	// allocate memory on c heap, so that Go can copy data to that memory location
-	char *ptr = (char *) malloc(40 * sizeof (char));
+	char *ptr = malloc(40 * sizeof (char));
 	int res;
 
 	// call go Function trhough cgo wrapper. We need to pass the pointer to our allocated memory
@@ -102,7 +101,7 @@ int fetch_key(key_storage *key_store, uint8_t index, uint32_t val_time, uint64_t
 	SUSPICIOUS_KEY_CHANGE_RATIO = 30;
 
 	// allocate key struct and fetch the actual key
-	key = malloc(sizeof(key_storage));
+	key = malloc(sizeof *key);
 	ret = get_DRKey(val_time, as, key);
 	if(ret < 0){
 		printf(" failed\n");
