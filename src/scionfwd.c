@@ -937,6 +937,8 @@ static void scionfwd_simple_forward(
 
 #if ENFORCE_LF_RATE_LIMIT_FILTER
 				dictionary_flow *lcore_dict = dos_stats[lcore_id].dos_dictionary[state];
+				r = dic_find_flow(lcore_dict, lf_hdr->src_ia);
+				RTE_ASSERT(r == 1);
 
 				// Rate limit LF traffic
 				if (lcore_dict->value->secX_counter <= 0) {
@@ -944,9 +946,9 @@ static void scionfwd_simple_forward(
 						int64_t reserve = rte_atomic64_read(lcore_dict->value->reserve);
 						if (reserve <= 0) {
 							lcore_values->stats.as_rate_limited++;
-							// #if LOG_PACKETS
-							printf("[%d] LF rate limit exceeded.\n", lcore_id);
-							// #endif
+	#if LOG_PACKETS
+							printf("[%d] LF rate limit for %0lx exceeded.\n", lcore_id, lf_hdr->src_ia);
+	#endif
 							goto drop_pkt;
 						} else {
 							rte_atomic64_sub(lcore_dict->value->reserve, ipv4_total_length1);
@@ -963,9 +965,9 @@ static void scionfwd_simple_forward(
 						int64_t reserve = rte_atomic64_read(dos_stats[lcore_id].reserve[state]);
 						if (reserve <= 0) {
 							lcore_values->stats.rate_limited++;
-							// #if LOG_PACKETS
-							printf("[%d] LF rate limit exceeded.\n", lcore_id);
-							// #endif
+	#if LOG_PACKETS
+							printf("[%d] LF overall rate limit for %0lx exceeded.\n", lcore_id, lf_hdr->src_ia);
+	#endif
 							goto drop_pkt;
 						} else {
 							rte_atomic64_sub(dos_stats[lcore_id].reserve[state], ipv4_total_length1);
@@ -1006,6 +1008,9 @@ static void scionfwd_simple_forward(
 			struct lcore_values *lcore_values = &core_vars[lcore_id];
 			dictionary_flow *lcore_dict = dos_stats[lcore_id].dos_dictionary[state];
 
+			int r = dic_find_flow(lcore_dict, 0);
+			RTE_ASSERT(r == 1);
+
 			// Rate limit non-LF traffic
 			if (lcore_dict->value->sc_counter <= 0) {
 				lcore_values->stats.as_rate_limited++;
@@ -1020,7 +1025,7 @@ static void scionfwd_simple_forward(
 			if (dos_stats[lcore_id].sc_dos_packet_count[state] <= 0) {
 				lcore_values->stats.rate_limited++;
 #if LOG_PACKETS
-				printf("[%d] Non-LF rate limit exceeded.\n", lcore_id);
+				printf("[%d] Non-LF overall rate limit exceeded.\n", lcore_id);
 #endif
 				goto drop_pkt;
 			} else {
