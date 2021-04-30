@@ -70,10 +70,10 @@ static void test_derive_lvl2DRKey(void **state)
 	uint32_t now = time(NULL);
 	uint32_t next_time;
 
-	key_storage *key_storage = malloc(sizeof *key_storage);
+	key_store *key_store = malloc(sizeof *key_store);
 	key_store_node *key_store_node = malloc(sizeof *key_store_node);
 	key_store_node->index = 0;
-	key_store_node->key_store = key_storage;
+	key_store_node->key_store = key_store;
 
 	dictionary * dict = dic_new(32);
 
@@ -81,15 +81,15 @@ static void test_derive_lvl2DRKey(void **state)
 
 
 	dic_find(dict,as);
-	key_storage = dict->value->key_store;
+	key_store = dict->value->key_store;
 
 	delegation_secret *key = malloc(sizeof *key);
-	get_DRKey(now, as, key);
+	fetch_delegation_secret(now, as, key);
 	next_time = key->epoch_end;
-	key_storage->drkeys[0] = key;
+	key_store->delegation_secrets[0] = key;
 	key = malloc(sizeof *key);
-	get_DRKey(next_time, as, key);
-	key_storage->drkeys[1] = key;
+	fetch_delegation_secret(next_time, as, key);
+	key_store->delegation_secrets[1] = key;
 
 	struct cycle_counts msmts;
 
@@ -128,10 +128,10 @@ static void test_compute_cmac(void **state)
 	uint32_t now = time(NULL);
 	uint32_t next_time;
 
-	key_storage *key_storage = malloc(sizeof *key_storage);
+	key_store *key_store = malloc(sizeof *key_store);
 	key_store_node *key_store_node = malloc(sizeof *key_store_node);
 	key_store_node->index = 0;
-	key_store_node->key_store = key_storage;
+	key_store_node->key_store = key_store;
 
 	dictionary * dict = dic_new(32);
 
@@ -139,15 +139,15 @@ static void test_compute_cmac(void **state)
 
 
 	dic_find(dict,as);
-	key_storage = dict->value->key_store;
+	key_store = dict->value->key_store;
 
 	delegation_secret *key = malloc(sizeof *key);
-	get_DRKey(now, as, key);
+	fetch_delegation_secret(now, as, key);
 	next_time = key->epoch_end;
-	key_storage->drkeys[0] = key;
+	key_store->delegation_secrets[0] = key;
 	key = malloc(sizeof *key);
-	get_DRKey(next_time, as, key);
-	key_storage->drkeys[1] = key;
+	fetch_delegation_secret(next_time, as, key);
+	key_store->delegation_secrets[1] = key;
 
 	struct cycle_counts msmts;
 

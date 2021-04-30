@@ -14,8 +14,7 @@
 // 2. It will not produce the same results on little-endian and big-endian
 //    machines.
 
-unsigned int murmurhash(const void * key, int len, const unsigned int seed)
-{
+unsigned int murmurhash(const void *key, int len, const unsigned int seed) {
 	// 'm' and 'r' are mixing constants generated offline.
 	// They're not really 'magic', they just happen to work well.
 
@@ -28,10 +27,9 @@ unsigned int murmurhash(const void * key, int len, const unsigned int seed)
 
 	// Mix 4 bytes at a time into the hash
 
-	const unsigned char * data = (const unsigned char *)key;
+	const unsigned char *data = (const unsigned char *)key;
 
-	while(len >= 4)
-	{
+	while (len >= 4) {
 		unsigned int k = *(const unsigned int *)data;
 
 		k *= m;
@@ -47,20 +45,22 @@ unsigned int murmurhash(const void * key, int len, const unsigned int seed)
 
 	// Handle the last few bytes of the input array
 
-	switch(len)
-	{
-	case 3: h ^= data[2] << 16;
+	switch (len) {
+		case 3:
+			h ^= data[2] << 16;
 			h ^= data[1] << 8;
 			h ^= data[0];
 			h *= m;
 			break;
-	case 2: h ^= data[1] << 8;
+		case 2:
+			h ^= data[1] << 8;
 			h ^= data[0];
-		    h *= m;
+			h *= m;
 			break;
-	case 1: h ^= data[0];
-	        h *= m;
-	        break;
+		case 1:
+			h ^= data[0];
+			h *= m;
+			break;
 	};
 
 	// Do a few final mixes of the hash to ensure the last few

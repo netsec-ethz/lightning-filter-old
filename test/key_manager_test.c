@@ -94,7 +94,7 @@ static void test_in_epoch_border_end(void **state)
 	assert_true(res == 1);
 }
 
-static void test_get_DRKey(void **state)
+static void test_fetch_delegation_secret(void **state)
 {
 	if(state == NULL){
 		state = NULL;
@@ -108,7 +108,7 @@ static void test_get_DRKey(void **state)
 	val_time = time(NULL);
 	srcIA = 1;
 
-	res = get_DRKey(val_time, srcIA, key);
+	res = fetch_delegation_secret(val_time, srcIA, key);
 
 	assert_true(res == 0);
 	assert_non_null(key);
@@ -118,7 +118,7 @@ static void test_get_DRKey(void **state)
 	assert_true(key->epoch_begin < key->epoch_end);
 }
 
-static void test_get_DRKey_mock_AS(void **state)
+static void test_fetch_delegation_secret_mock_AS(void **state)
 {
 	if(state == NULL){
 		state = NULL;
@@ -132,7 +132,7 @@ static void test_get_DRKey_mock_AS(void **state)
 	val_time = time(NULL);
 	srcIA = 1;
 
-	res = get_DRKey(val_time, srcIA, key);
+	res = fetch_delegation_secret(val_time, srcIA, key);
 
 	assert_true(res == 0);
 	assert_non_null(key);
@@ -142,7 +142,7 @@ static void test_get_DRKey_mock_AS(void **state)
 
 }
 
-static void test_get_DRKey_mock_epoch(void **state)
+static void test_fetch_delegation_secret_mock_epoch(void **state)
 {
 	if(state == NULL){
 		state = NULL;
@@ -156,7 +156,7 @@ static void test_get_DRKey_mock_epoch(void **state)
 	val_time = time(NULL);
 	srcIA = 1;
 
-	res = get_DRKey(val_time, srcIA, key);
+	res = fetch_delegation_secret(val_time, srcIA, key);
 
 	assert_true(res == 0);
 	assert_non_null(key);
@@ -167,7 +167,7 @@ static void test_get_DRKey_mock_epoch(void **state)
 	assert_true(key->epoch_end == key->epoch_begin + 90);
 }
 
-static void test_get_DRKey_mock_key_state(void **state)
+static void test_fetch_delegation_secret_mock_key_state(void **state)
 {	
 	if(state == NULL){
 		state = NULL;
@@ -184,7 +184,7 @@ static void test_get_DRKey_mock_key_state(void **state)
 	val_time = time(NULL);
 	srcIA = 1;
 
-	res = get_DRKey(val_time, srcIA, key);
+	res = fetch_delegation_secret(val_time, srcIA, key);
 
 	assert_true(res == 0);
 	assert_non_null(key);
@@ -210,18 +210,18 @@ static void test_check_and_fetch(void **state)
 	node->key_store = malloc(sizeof *node->key_store);
 	srcIA = 1;
 
-	assert_null(node->key_store->drkeys[0]);
-	assert_null(node->key_store->drkeys[1]);
-	assert_null(node->key_store->drkeys[2]);
+	assert_null(node->key_store->delegation_secrets[0]);
+	assert_null(node->key_store->delegation_secrets[1]);
+	assert_null(node->key_store->delegation_secrets[2]);
 
 	res = check_and_fetch(node, srcIA);
 	assert_true(res == 0);
 
-	assert_non_null(node->key_store->drkeys[0]);
-	assert_non_null(node->key_store->drkeys[1]);
-	assert_null(node->key_store->drkeys[2]);
+	assert_non_null(node->key_store->delegation_secrets[0]);
+	assert_non_null(node->key_store->delegation_secrets[1]);
+	assert_null(node->key_store->delegation_secrets[2]);
 
-	assert_true(node->key_store->drkeys[0]->epoch_begin < node->key_store->drkeys[1]->epoch_begin);
+	assert_true(node->key_store->delegation_secrets[0]->epoch_begin < node->key_store->delegation_secrets[1]->epoch_begin);
 
 
 }
@@ -238,9 +238,9 @@ static void test_check_and_fetch_grace_period(void **state)
 	node->key_store = malloc(sizeof *node->key_store);
 	srcIA = 1;
 
-	assert_null(node->key_store->drkeys[0]);
-	assert_null(node->key_store->drkeys[1]);
-	assert_null(node->key_store->drkeys[2]);
+	assert_null(node->key_store->delegation_secrets[0]);
+	assert_null(node->key_store->delegation_secrets[1]);
+	assert_null(node->key_store->delegation_secrets[2]);
 
 	res = check_and_fetch(node, srcIA);
 	assert_true(res == 0);
@@ -250,12 +250,12 @@ static void test_check_and_fetch_grace_period(void **state)
 	res = check_and_fetch(node, srcIA);
 	assert_true(res == 0);
 
-	assert_non_null(node->key_store->drkeys[0]);
-	assert_non_null(node->key_store->drkeys[1]);
-	assert_non_null(node->key_store->drkeys[2]);
+	assert_non_null(node->key_store->delegation_secrets[0]);
+	assert_non_null(node->key_store->delegation_secrets[1]);
+	assert_non_null(node->key_store->delegation_secrets[2]);
 
-	assert_true(node->key_store->drkeys[0]->epoch_begin < node->key_store->drkeys[1]->epoch_begin);
-	assert_true(node->key_store->drkeys[1]->epoch_begin < node->key_store->drkeys[2]->epoch_begin);
+	assert_true(node->key_store->delegation_secrets[0]->epoch_begin < node->key_store->delegation_secrets[1]->epoch_begin);
+	assert_true(node->key_store->delegation_secrets[1]->epoch_begin < node->key_store->delegation_secrets[2]->epoch_begin);
 
 }
 
@@ -271,14 +271,14 @@ static void test_check_and_fetch_grace_suspicious_long(void **state)
 	node->key_store = malloc(sizeof *node->key_store);
 	srcIA = 1;
 
-	assert_null(node->key_store->drkeys[0]);
-	assert_null(node->key_store->drkeys[1]);
-	assert_null(node->key_store->drkeys[2]);
+	assert_null(node->key_store->delegation_secrets[0]);
+	assert_null(node->key_store->delegation_secrets[1]);
+	assert_null(node->key_store->delegation_secrets[2]);
 
 	res = check_and_fetch(node, srcIA);
 	assert_true(res == 0);
 
-	node->key_store->drkeys[1]->epoch_end *= 2;
+	node->key_store->delegation_secrets[1]->epoch_end *= 2;
 
 	sleep(KEY_GRACE_PERIOD + 1);
 
@@ -298,14 +298,14 @@ static void test_check_and_fetch_grace_suspicious_short(void **state)
 	node->key_store = malloc(sizeof *node->key_store);
 	srcIA = 1;
 
-	assert_null(node->key_store->drkeys[0]);
-	assert_null(node->key_store->drkeys[1]);
-	assert_null(node->key_store->drkeys[2]);
+	assert_null(node->key_store->delegation_secrets[0]);
+	assert_null(node->key_store->delegation_secrets[1]);
+	assert_null(node->key_store->delegation_secrets[2]);
 
 	res = check_and_fetch(node, srcIA);
 	assert_true(res == 0);
 
-	node->key_store->drkeys[1]->epoch_end = node->key_store->drkeys[1]->epoch_begin;
+	node->key_store->delegation_secrets[1]->epoch_end = node->key_store->delegation_secrets[1]->epoch_begin;
 
 	sleep(KEY_GRACE_PERIOD + 1);
 

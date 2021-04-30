@@ -103,19 +103,23 @@
 	#include <openssl/evp.h>
 #endif
 
-#include "cycle_measurements.h"
-#include "hashdict.h"
+#include "lib/drkey/libdrkey.h"
+
 #include "hashdict_flow.h"
-#include "key_manager.h"
+#include "key_dictionary.h"
 #include "key_storage.h"
+#include "measurements.h"
 #include "scion_bloom.h"
 
 /* defines */
 
 #define SIMPLE_FORWARD 0
 
+#define ENABLE_KEY_MANAGEMENT 0
+#define ENABLE_MEASUREMENTS 0
 #define ENFORCE_DUPLICATE_FILTER 0
 #define ENFORCE_LF_RATE_LIMIT_FILTER 1
+#define LOG_DELEGATION_SECRETS 0
 #define LOG_PACKETS 0
 
 // logging
@@ -132,7 +136,6 @@
 #define ADDRESS "/tmp/echo.sock"
 
 // States for DOS
-// (EVEN and ODD are black and red in the thesis for better visualisation)
 #define EVEN 0
 #define ODD 1
 
@@ -156,6 +159,9 @@
 static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
 static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
 
+// Key manager constants
+#define DEFAULT_KEY_DICTIONARY_SIZE (32)
+
 // Protocol specific constants
 #define IP_TTL_DEFAULT 0xff
 #define IP_PROTO_ID_TCP 0x06
@@ -166,15 +172,21 @@ static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
  * LF configuration
  */
 
+static uint64_t local_ia = 0x0013ffaa00010eed;
+
 struct backend {
 	rte_be32_t private_addr;
 	rte_be32_t public_addr;
-	rte_be64_t isd_as_num;
+	rte_be64_t ia;
 };
 
 struct backend backends[] = {
-	{ .private_addr = 0xc5301fac, .public_addr = 0xb9ddb912, .isd_as_num = 0x01000100aaff3f00 },
-	{ .private_addr = 0x543a1fac, .public_addr = 0x87dec612, .isd_as_num = 0x02000100aaff3f00 },
+	{ .private_addr = 0xc5301fac /* 172.31.48.197 */,
+		.public_addr = 0xb9ddb912 /* 18.185.221.185 */,
+		.ia = 0x0011ffaa00010d69 },
+	{ .private_addr = 0x543a1fac /* 172.31.58.84 */,
+		.public_addr = 0x87dec612 /* 18.198.222.135 */,
+		.ia = 0x0011ffaa00010e97 },
 };
 
 struct peer {
@@ -182,8 +194,8 @@ struct peer {
 };
 
 struct peer peers[] = {
-	{ .public_addr = 0x87dec612 },
-	{ .public_addr = 0xb9ddb912 },
+	{ .public_addr = 0x87dec612 /* 18.198.222.135 */ },
+	{ .public_addr = 0xb9ddb912 /* 18.185.221.185 */ },
 };
 
 /**
@@ -192,7 +204,7 @@ struct peer peers[] = {
 struct lf_hdr {
 	uint8_t lf_pkt_type;
 	uint8_t reserved[3];
-	uint64_t isd_as_num;
+	uint64_t src_ia;
 	uint8_t encaps_pkt_chksum[16];
 	uint16_t encaps_pkt_len;
 } __attribute__((__packed__));
@@ -200,7 +212,7 @@ struct lf_hdr {
 /* MAIN DATA STRUCTS */
 
 // cycle count struct, used by each core to collect cycle counts
-struct cycle_counts measurements[RTE_MAX_LCORE];
+struct measurements measurements[RTE_MAX_LCORE];
 
 /* mempool, we have one mempool for each socket, shared by
  * all cores on that socket */
@@ -238,8 +250,6 @@ typedef struct lcore_values {
 	uint16_t tx_firewall_queue_id;
 } lcore_values;
 struct lcore_values core_vars[RTE_MAX_LCORE];
-// rte_spinlock_t rx_locks[RTE_MAX_LCORE];
-// rte_spinlock_t tx_locks[RTE_MAX_LCORE];
 
 // port runtime struct
 typedef struct port_values {
@@ -337,7 +347,8 @@ bool is_in_use[RTE_MAX_LCORE];
 
 // key manager
 uint32_t key_manager_core_id; /* cpu_id of the key manager core */
-dictionary *key_dictinionary[RTE_MAX_LCORE]; /* holds pointer to the key dictionary of each core */
+struct key_dictionary
+	*key_dictionaries[RTE_MAX_LCORE]; /* holds pointer to the key dictionary of each core */
 
 // used to store key struct, roundkeys, computed CMAC and packet CMAC
 // in CMAC computation. Memory allocation at main loop start
@@ -408,26 +419,6 @@ static uint64_t dos_slice_period; /* lenght of a rate limit slice (100 micro sec
  * (deprecated)
  */
 uint64_t receive_limit = UINT64_MAX;
-
-/* function prototypes */
-
-#if LOG_PACKETS
-static void dump_hex(const unsigned lcore_id, const void *data, size_t size);
-#endif
-#if 0
-static void setfwd_eth_addrs(struct rte_mbuf *m);
-#endif
-static void swap_eth_addrs(struct rte_mbuf *m);
-
-int scion_filter_main(int argc, char **argv);
-int export_set_up_metrics(void);
-int cli_read_line(void);
-void print_cli_usage(void);
-void prompt(void);
-int load_config(const char *file_name);
-int load_rate_limits(const char *file_name);
-static int scionfwd_parse_portmask(const char *portmask);
-static int scionfwd_parse_timer_period(const char *q_arg);
 
 #if LOG_PACKETS
 /* Adapted from: https://github.com/NEOAdvancedTechnology/MinimalDPDKExamples
@@ -561,11 +552,11 @@ static int is_peer(rte_be32_t public_addr) {
 	return find_peer(public_addr, NULL);
 }
 
-static rte_be64_t backend_isd_as_num(rte_be32_t private_addr) {
+static rte_be64_t backend_ia(rte_be32_t private_addr) {
 	struct backend b;
 	int r = find_backend(private_addr, &b);
 	RTE_ASSERT(r != 0);
-	return b.isd_as_num;
+	return b.ia;
 }
 
 static rte_be32_t backend_public_addr(rte_be32_t private_addr) {
@@ -575,24 +566,21 @@ static rte_be32_t backend_public_addr(rte_be32_t private_addr) {
 	return b.public_addr;
 }
 
-static key_store_node *get_key_store_node(dictionary *d, rte_be64_t isd_as_num) {
-	int r = dic_find(d, isd_as_num);
-	if (r == 0) {
-		return NULL;
-	}
-	return d->value;
-}
-
-static delegation_secret *get_delegation_secret(key_store_node *n, time_t current_time) {
-	uint32_t t = (uint32_t)current_time;
-	delegation_secret *ds = n->key_store->drkeys[n->index];
-	if ((ds == NULL) || (t < ds->epoch_begin) || (ds->epoch_end < t)) {
-		n->index = SCION_NEXT_KEY_INDEX(n->index);
-		ds = n->key_store->drkeys[n->index];
-		if ((ds == NULL) || (t < ds->epoch_begin) || (ds->epoch_end < t)) {
-			n->index = SCION_NEXT_KEY_INDEX(n->index);
-			ds = n->key_store->drkeys[n->index];
-			if ((ds == NULL) || (t < ds->epoch_begin) || (ds->epoch_end < t)) {
+static struct delegation_secret *get_delegation_secret(struct key_store_node *n, int64_t t) {
+	struct delegation_secret *ds = &n->key_store->delegation_secrets[n->key_index];
+	if ((ds->validity_not_before >= ds->validity_not_after) || (t < ds->validity_not_before)
+			|| (ds->validity_not_after < t))
+	{
+		n->key_index = NEXT_KEY_INDEX(n->key_index);
+		ds = &n->key_store->delegation_secrets[n->key_index];
+		if ((ds->validity_not_before >= ds->validity_not_after) || (t < ds->validity_not_before)
+				|| (ds->validity_not_after < t))
+		{
+			n->key_index = NEXT_KEY_INDEX(n->key_index);
+			ds = &n->key_store->delegation_secrets[n->key_index];
+			if ((ds->validity_not_before >= ds->validity_not_after) || (t < ds->validity_not_before)
+					|| (ds->validity_not_after < t))
+			{
 				return NULL;
 			}
 		}
@@ -600,65 +588,62 @@ static delegation_secret *get_delegation_secret(key_store_node *n, time_t curren
 	return ds;
 }
 
-static void compute_lf_chksum(const unsigned lcore_id,
-	unsigned char drkey[16], rte_be32_t src_addr, rte_be32_t dst_addr,
-	void *data, size_t data_len, unsigned char chksum[16], unsigned char rkey_buf[10 * 16],
-	unsigned char addr_buf[32])
-{
+static void compute_lf_chksum(const unsigned lcore_id, unsigned char drkey[16], rte_be32_t src_addr,
+	rte_be32_t dst_addr, void *data, size_t data_len, unsigned char chksum[16],
+	unsigned char rkey_buf[10 * 16], unsigned char addr_buf[32]) {
 	RTE_ASSERT(data_len % 16 == 0);
 	RTE_ASSERT(data_len <= INT_MAX);
 	(void)memset(addr_buf, 0, 32);
 	(void)rte_memcpy(addr_buf, &src_addr, sizeof src_addr);
 	(void)rte_memcpy(addr_buf + 16, &dst_addr, sizeof dst_addr);
 
-	#if defined __x86_64__ && __x86_64__
-		(void)lcore_id;
+#if defined __x86_64__ && __x86_64__
+	(void)lcore_id;
 
-		memset(rkey_buf, 0, 10 * 16);
-		ExpandKey128(drkey, rkey_buf);
-		CBCMAC(rkey_buf, 32 / 16, addr_buf, chksum);
-		memset(rkey_buf, 0, 10 * 16);
-		ExpandKey128(chksum, rkey_buf);
-		CBCMAC(rkey_buf, data_len / 16, data, chksum);
-	#else
-		(void)rkey_buf;
+	memset(rkey_buf, 0, 10 * 16);
+	ExpandKey128(drkey, rkey_buf);
+	CBCMAC(rkey_buf, 32 / 16, addr_buf, chksum);
+	memset(rkey_buf, 0, 10 * 16);
+	ExpandKey128(chksum, rkey_buf);
+	CBCMAC(rkey_buf, data_len / 16, data, chksum);
+#else
+	(void)rkey_buf;
 
-		int r, n;
-		unsigned char key[16], iv[16];
+	int r, n;
+	unsigned char key[16], iv[16];
 
-		EVP_CIPHER_CTX *ctx = cipher_ctx[lcore_id];
+	EVP_CIPHER_CTX *ctx = cipher_ctx[lcore_id];
 
-		(void)rte_memcpy(key, drkey, 16);
-		(void)memset(iv, 0, 16);
-		r = EVP_CIPHER_CTX_reset(ctx);
-		RTE_ASSERT(r == 1);
-		r = EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, key, iv);
-		RTE_ASSERT(r == 1);
-		r = EVP_CIPHER_CTX_set_padding(ctx, 0);
-		RTE_ASSERT(r == 1);
-		r = EVP_EncryptUpdate(ctx, chksum, &n, addr_buf, 32);
-		RTE_ASSERT((r == 1) && (n == 32));
-		r = EVP_EncryptFinal_ex(ctx, &chksum[n], &n);
-		RTE_ASSERT((r == 1) && (n == 0));
+	(void)rte_memcpy(key, drkey, 16);
+	(void)memset(iv, 0, 16);
+	r = EVP_CIPHER_CTX_reset(ctx);
+	RTE_ASSERT(r == 1);
+	r = EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, key, iv);
+	RTE_ASSERT(r == 1);
+	r = EVP_CIPHER_CTX_set_padding(ctx, 0);
+	RTE_ASSERT(r == 1);
+	r = EVP_EncryptUpdate(ctx, chksum, &n, addr_buf, 32);
+	RTE_ASSERT((r == 1) && (n == 32));
+	r = EVP_EncryptFinal_ex(ctx, &chksum[n], &n);
+	RTE_ASSERT((r == 1) && (n == 0));
 
-		(void)rte_memcpy(key, chksum, 16);
-		(void)memset(iv, 0, 16);
-		r = EVP_CIPHER_CTX_reset(ctx);
-		RTE_ASSERT(r == 1);
-		r = EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, key, iv);
-		RTE_ASSERT(r == 1);
-		r = EVP_CIPHER_CTX_set_padding(ctx, 0);
-		RTE_ASSERT(r == 1);
-		r = EVP_EncryptUpdate(ctx, chksum, &n, data, (int)data_len);
-		RTE_ASSERT((r == 1) && (n == (int)data_len));
-		r = EVP_EncryptFinal_ex(ctx, &chksum[n], &n);
-		RTE_ASSERT((r == 1) && (n == 0));
-	#endif
+	(void)rte_memcpy(key, chksum, 16);
+	(void)memset(iv, 0, 16);
+	r = EVP_CIPHER_CTX_reset(ctx);
+	RTE_ASSERT(r == 1);
+	r = EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, key, iv);
+	RTE_ASSERT(r == 1);
+	r = EVP_CIPHER_CTX_set_padding(ctx, 0);
+	RTE_ASSERT(r == 1);
+	r = EVP_EncryptUpdate(ctx, chksum, &n, data, (int)data_len);
+	RTE_ASSERT((r == 1) && (n == (int)data_len));
+	r = EVP_EncryptFinal_ex(ctx, &chksum[n], &n);
+	RTE_ASSERT((r == 1) && (n == 0));
+#endif
 }
 
 static void scionfwd_simple_forward(
-	struct rte_mbuf *m, const unsigned lcore_id, struct lcore_values *lvars, int16_t state)
-{
+	struct rte_mbuf *m, const unsigned lcore_id, struct lcore_values *lvars, int16_t state) {
 #if SIMPLE_FORWARD
 	swap_eth_addrs(m);
 
@@ -666,10 +651,8 @@ static void scionfwd_simple_forward(
 	printf("[%d] Forwarding outgoing packet:\n", lcore_id);
 	dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
 	#endif
-	// rte_spinlock_lock(&tx_locks[lvars->tx_bypass_queue_id]);
 	uint16_t n = rte_eth_tx_buffer(
 		lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
-	// rte_spinlock_unlock(&tx_locks[lvars->tx_bypass_queue_id]);
 	(void)n;
 	#if LOG_PACKETS
 	if (n > 0) {
@@ -812,15 +795,18 @@ static void scionfwd_simple_forward(
 					// #endif
 					goto drop_pkt;
 				}
-				dictionary *d = key_dictinionary[lcore_id];
-				key_store_node *n = get_key_store_node(d, lf_hdr->isd_as_num);
+				RTE_ASSERT((INT64_MIN <= tv.tv_sec) && (tv.tv_sec <= INT64_MAX));
+				int64_t t_now = tv.tv_sec;
+				struct key_dictionary *d = key_dictionaries[lcore_id];
+				key_dictionary_find(d, lf_hdr->src_ia);
+				struct key_store_node *n = d->value;
 				if (n == NULL) {
 					// #if LOG_PACKETS
 					printf("[%d] Key store lookup failed.\n", lcore_id);
 					// #endif
 					goto drop_pkt;
 				}
-				delegation_secret *ds = get_delegation_secret(n, tv.tv_sec);
+				struct delegation_secret *ds = get_delegation_secret(n, t_now);
 				if (ds == NULL) {
 					// #if LOG_PACKETS
 					printf("[%d] Delegation secret lookup failed.\n", lcore_id);
@@ -828,13 +814,12 @@ static void scionfwd_simple_forward(
 					goto drop_pkt;
 				}
 #if LOG_PACKETS
-				printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, lf_hdr->isd_as_num, tv.tv_sec);
-				dump_hex(lcore_id, ds->DRKey, 16);
+				printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, lf_hdr->src_ia, t_now);
+				dump_hex(lcore_id, ds->key, 16);
 				printf("[%d] }\n", lcore_id);
 #endif
-				compute_lf_chksum(
-					lcore_id,
-					/* drkey: */ ds->DRKey,
+				compute_lf_chksum(lcore_id,
+					/* drkey: */ ds->key,
 					/* src_addr: */ ipv4_hdr_src_addr0,
 					/* dst_addr: */ backend_public_addr(ipv4_hdr_dst_addr0),
 					/* data: */ &lf_hdr->encaps_pkt_len,
@@ -842,42 +827,54 @@ static void scionfwd_simple_forward(
 					/* chksum: */ chksum,
 					/* rkey_buf: */ roundkey[lcore_id],
 					/* addr_buf: */ key_hosts_addrs[lcore_id]);
-				if (unlikely(crypto_cmp_16(lf_hdr->encaps_pkt_chksum, chksum) != 0)) {
-					uint32_t t = (uint32_t)tv.tv_sec;
-					if (ds->epoch_end - KEY_GRACE_PERIOD > t) {
-						ds = n->key_store->drkeys[SCION_NEXT_KEY_INDEX(n->index)];
-					} else if (ds->epoch_begin + KEY_GRACE_PERIOD < t) {
-						ds = n->key_store->drkeys[SCION_PREV_KEY_INDEX(n->index)];
-					} else {
-						ds = NULL;
-					}
-					if (ds == NULL) {
-						// #if LOG_PACKETS
-						printf("[%d] Delegation secret lookup failed.\n", lcore_id);
-						// #endif
-						goto drop_pkt;
-					}
+				bool is_chksum_valid = crypto_cmp_16(lf_hdr->encaps_pkt_chksum, chksum) == 0;
+				if (unlikely(
+							!is_chksum_valid && (ds->validity_not_after - t_now < max_key_validity_extension))) {
+					ds = &n->key_store->delegation_secrets[NEXT_KEY_INDEX(n->key_index)];
+					if (ds->validity_not_before < ds->validity_not_after) {
 #if LOG_PACKETS
-					printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, lf_hdr->isd_as_num, tv.tv_sec);
-					dump_hex(lcore_id, ds->DRKey, 16);
-					printf("[%d] }\n", lcore_id);
+						printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, lf_hdr->src_ia, t_now);
+						dump_hex(lcore_id, ds->key, 16);
+						printf("[%d] }\n", lcore_id);
 #endif
-					compute_lf_chksum(
-						lcore_id,
-						/* drkey: */ ds->DRKey,
-						/* src_addr: */ ipv4_hdr_src_addr0,
-						/* dst_addr: */ backend_public_addr(ipv4_hdr_dst_addr0),
-						/* data: */ &lf_hdr->encaps_pkt_len,
-						/* data_len: */ sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len + encaps_trl_len,
-						/* chksum: */ chksum,
-						/* rkey_buf: */ roundkey[lcore_id],
-						/* addr_buf: */ key_hosts_addrs[lcore_id]);
-					if (unlikely(crypto_cmp_16(lf_hdr->encaps_pkt_chksum, chksum) != 0)) {
-						// #if LOG_PACKETS
-						printf("[%d] Invalid LF packet: checksum verification failed.\n", lcore_id);
-						// #endif
-						goto drop_pkt;
+						compute_lf_chksum(lcore_id,
+							/* drkey: */ ds->key,
+							/* src_addr: */ ipv4_hdr_src_addr0,
+							/* dst_addr: */ backend_public_addr(ipv4_hdr_dst_addr0),
+							/* data: */ &lf_hdr->encaps_pkt_len,
+							/* data_len: */ sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len + encaps_trl_len,
+							/* chksum: */ chksum,
+							/* rkey_buf: */ roundkey[lcore_id],
+							/* addr_buf: */ key_hosts_addrs[lcore_id]);
+						is_chksum_valid = crypto_cmp_16(lf_hdr->encaps_pkt_chksum, chksum) == 0;
 					}
+				}
+				if (unlikely(
+							!is_chksum_valid && (t_now - ds->validity_not_before < max_key_validity_extension))) {
+					ds = &n->key_store->delegation_secrets[PREV_KEY_INDEX(n->key_index)];
+					if (ds->validity_not_before < ds->validity_not_after) {
+#if LOG_PACKETS
+						printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, lf_hdr->src_ia, t_now);
+						dump_hex(lcore_id, ds->key, 16);
+						printf("[%d] }\n", lcore_id);
+#endif
+						compute_lf_chksum(lcore_id,
+							/* drkey: */ ds->key,
+							/* src_addr: */ ipv4_hdr_src_addr0,
+							/* dst_addr: */ backend_public_addr(ipv4_hdr_dst_addr0),
+							/* data: */ &lf_hdr->encaps_pkt_len,
+							/* data_len: */ sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len + encaps_trl_len,
+							/* chksum: */ chksum,
+							/* rkey_buf: */ roundkey[lcore_id],
+							/* addr_buf: */ key_hosts_addrs[lcore_id]);
+						is_chksum_valid = crypto_cmp_16(lf_hdr->encaps_pkt_chksum, chksum) == 0;
+					}
+				}
+				if (unlikely(!is_chksum_valid)) {
+					// #if LOG_PACKETS
+					printf("[%d] Invalid LF packet: checksum verification failed.\n", lcore_id);
+					// #endif
+					goto drop_pkt;
 				}
 				if (encaps_trl_len != 0) {
 					int r = rte_pktmbuf_trim(m, encaps_trl_len);
@@ -1037,10 +1034,8 @@ static void scionfwd_simple_forward(
 		printf("[%d] Forwarding incoming packet:\n", lcore_id);
 		dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
 #endif
-		// rte_spinlock_lock(&tx_locks[lvars->tx_bypass_queue_id]);
 		uint16_t n = rte_eth_tx_buffer(
 			lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
-		// rte_spinlock_unlock(&tx_locks[lvars->tx_bypass_queue_id]);
 		(void)n;
 #if LOG_PACKETS
 		if (n > 0) {
@@ -1088,7 +1083,7 @@ static void scionfwd_simple_forward(
 
 			rte_be32_t ipv4_hdr_src_addr0 = ipv4_hdr0->src_addr;
 			rte_be32_t ipv4_hdr_dst_addr0 = ipv4_hdr0->dst_addr;
-			rte_be64_t src_isd_as_num = backend_isd_as_num(ipv4_hdr_src_addr0);
+			rte_be64_t src_ia = backend_ia(ipv4_hdr_src_addr0);
 
 			ipv4_hdr0->hdr_checksum = 0;
 			ipv4_hdr0->src_addr = 0;
@@ -1126,7 +1121,7 @@ static void scionfwd_simple_forward(
 			lf_hdr->reserved[0] = 0;
 			lf_hdr->reserved[1] = 0;
 			lf_hdr->reserved[2] = 0;
-			lf_hdr->isd_as_num = src_isd_as_num;
+			lf_hdr->src_ia = src_ia;
 			lf_hdr->encaps_pkt_len = rte_cpu_to_be_16(ipv4_total_length0);
 
 			if (encaps_trl_len != 0) {
@@ -1143,15 +1138,18 @@ static void scionfwd_simple_forward(
 				// #endif
 				goto drop_pkt;
 			}
-			dictionary *d = key_dictinionary[lcore_id];
-			key_store_node *n = get_key_store_node(d, src_isd_as_num);
+			RTE_ASSERT((INT64_MIN <= tv.tv_sec) && (tv.tv_sec <= INT64_MAX));
+			int64_t t_now = tv.tv_sec;
+			struct key_dictionary *d = key_dictionaries[lcore_id];
+			key_dictionary_find(d, src_ia);
+			struct key_store_node *n = d->value;
 			if (n == NULL) {
 				// #if LOG_PACKETS
 				printf("[%d] Key store lookup failed.\n", lcore_id);
 				// #endif
 				goto drop_pkt;
 			}
-			delegation_secret *ds = get_delegation_secret(n, tv.tv_sec);
+			struct delegation_secret *ds = get_delegation_secret(n, t_now);
 			if (ds == NULL) {
 				// #if LOG_PACKETS
 				printf("[%d] Delegation secret lookup failed.\n", lcore_id);
@@ -1159,13 +1157,12 @@ static void scionfwd_simple_forward(
 				goto drop_pkt;
 			}
 #if LOG_PACKETS
-			printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, src_isd_as_num, tv.tv_sec);
-			dump_hex(lcore_id, ds->DRKey, 16);
+			printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, src_ia, t_now);
+			dump_hex(lcore_id, ds->key, 16);
 			printf("[%d] }\n", lcore_id);
 #endif
-			compute_lf_chksum(
-				lcore_id,
-				/* drkey: */ ds->DRKey,
+			compute_lf_chksum(lcore_id,
+				/* drkey: */ ds->key,
 				/* src_addr: */ backend_public_addr(ipv4_hdr_src_addr0),
 				/* dst_addr: */ ipv4_hdr_dst_addr0,
 				/* data: */ &lf_hdr->encaps_pkt_len,
@@ -1189,10 +1186,8 @@ static void scionfwd_simple_forward(
 		printf("[%d] Forwarding outgoing packet:\n", lcore_id);
 		dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
 #endif
-		// rte_spinlock_lock(&tx_locks[lvars->tx_bypass_queue_id]);
 		uint16_t n = rte_eth_tx_buffer(
 			lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
-		// rte_spinlock_unlock(&tx_locks[lvars->tx_bypass_queue_id]);
 		(void)n;
 #if LOG_PACKETS
 		if (n > 0) {
@@ -1228,8 +1223,8 @@ static void scionfwd_main_loop(void) {
 	last_dos_slice_tsc = rte_rdtsc();
 	prev_tsc = 0;
 
-#if MEASURE_CYCLES
-	struct cycle_counts *msmts = &measurements[lcore_id];
+#if ENABLE_MEASUREMENTS
+	struct measurements *msmts = &measurements[lcore_id];
 #endif
 
 	lvars = &core_vars[lcore_id];
@@ -1249,10 +1244,10 @@ static void scionfwd_main_loop(void) {
 	computed_cmac[lcore_id] = rte_malloc(NULL, 16, RTE_CACHE_LINE_SIZE);
 	RTE_ASSERT(computed_cmac[lcore_id]);
 
-	#if !(defined __x86_64__ && __x86_64__)
-		cipher_ctx[lcore_id] = EVP_CIPHER_CTX_new();
-		RTE_ASSERT(cipher_ctx[lcore_id]);
-	#endif
+#if !(defined __x86_64__ && __x86_64__)
+	cipher_ctx[lcore_id] = EVP_CIPHER_CTX_new();
+	RTE_ASSERT(cipher_ctx[lcore_id]);
+#endif
 
 	state = !rte_atomic16_read(&dos_state);
 
@@ -1263,13 +1258,11 @@ static void scionfwd_main_loop(void) {
 		// TX burst queue drain
 		if (unlikely(diff_tsc > drain_tsc)) {
 			prev_tsc = cur_tsc;
-#if MEASURE_CYCLES
+#if ENABLE_MEASUREMENTS
 			msmts->tx_drain_start = rte_rdtsc();
 #endif
-			// rte_spinlock_lock(&tx_locks[lvars->tx_bypass_queue_id]);
 			n = rte_eth_tx_buffer_flush(
 				lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer);
-			// rte_spinlock_unlock(&tx_locks[lvars->tx_bypass_queue_id]);
 #if LOG_PACKETS
 			if (n > 0) {
 				printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
@@ -1282,21 +1275,19 @@ static void scionfwd_main_loop(void) {
 				printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
 			}
 #endif
-#if MEASURE_CYCLES
+#if ENABLE_MEASUREMENTS
 			msmts->tx_drain_cnt++;
 			msmts->tx_drain_sum += rte_rdtsc() - msmts->tx_drain_start;
 #endif
 		}
 
-#if MEASURE_CYCLES
+#if ENABLE_MEASUREMENTS
 		msmts->rx_drain_start = rte_rdtsc();
 #endif
 
-		// rte_spinlock_lock(&rx_locks[lvars->rx_queue_id]);
 		n = rte_eth_rx_burst(lvars->rx_port_id, lvars->rx_queue_id, pkts_burst, MAX_PKT_BURST);
-		// rte_spinlock_unlock(&rx_locks[lvars->rx_queue_id]);
 
-#if MEASURE_CYCLES
+#if ENABLE_MEASUREMENTS
 		msmts->rx_drain_cnt = rte_rdtsc();
 		msmts->rx_drain_sum += rte_rdtsc() - msmts->rx_drain_start;
 #endif
@@ -1312,7 +1303,7 @@ static void scionfwd_main_loop(void) {
 
 			rte_prefetch0(rte_pktmbuf_mtod(m, void *));
 
-#if MEASURE_CYCLES
+#if ENABLE_MEASUREMENTS
 			msmts->dup_start = rte_rdtsc();
 #endif
 
@@ -1327,7 +1318,7 @@ static void scionfwd_main_loop(void) {
 
 			scionfwd_simple_forward(m, lcore_id, lvars, state);
 
-#if MEASURE_CYCLES
+#if ENABLE_MEASUREMENTS
 			msmts->dup_cnt++;
 			msmts->dup_sum += rte_rdtsc() - msmts->dup_start;
 #endif
@@ -1341,7 +1332,7 @@ static void scionfwd_main_loop(void) {
  * the configuration
  * communicates via IPC with the Go metrics exporter
  */
-int export_set_up_metrics(void) {
+static void export_set_up_metrics(void) {
 	register int s, socket_len;
 	struct sockaddr_un saun;
 	char buffer[256];
@@ -1354,27 +1345,23 @@ int export_set_up_metrics(void) {
 	saun.sun_family = AF_UNIX;
 	strcpy(saun.sun_path, ADDRESS);
 
-	// aquire UNIX socket
 	if ((s = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
 		rte_exit(EXIT_FAILURE, "Metrics core could not get a UNIX socket\n");
 	}
 
-	// connect to UNIX socket
 	socket_len = sizeof saun.sun_family + strlen(saun.sun_path);
 	if (connect(s, &saun, socket_len) < 0) {
 		printf("Metrics could not connect to socket\n");
 	}
 
-	// send system configuration
 	snprintf(buffer, sizeof buffer,
 		"set_up_sys_stats;%" PRIu64 ";%d;%" PRIu64 ";%" PRIu64 ";%d;%" PRIu32 ";%" PRIu8 ";%" PRIu8
 		";%" PRIu8 ";%" PRIu8 ";%" PRIu8 ";%" PRIu32 ";%" PRIu32 ";%" PRIu64 ";fin\n",
-		slice_timer_period_seconds, BLOOM_FILTERS, NUM_BLOOM_ENTRIES, BLOOM_ERROR_RATE, delta_us,
-		KEY_GRACE_PERIOD, nb_ports, nb_rx_ports, nb_tx_ports, nb_tx_bypass_ports, nb_tx_firewall_ports,
-		nb_cores, nb_slave_cores, receive_limit);
+		slice_timer_period_seconds, BLOOM_FILTERS, NUM_BLOOM_ENTRIES, BLOOM_ERROR_RATE, delta_us, 0,
+		nb_ports, nb_rx_ports, nb_tx_ports, nb_tx_bypass_ports, nb_tx_firewall_ports, nb_cores,
+		nb_slave_cores, receive_limit);
 	send(s, buffer, strlen(buffer), 0);
 
-	// for each active port, send the port configuration
 	for (port_id = 0; port_id < RTE_MAX_ETHPORTS; port_id++) {
 		if (is_active_port[port_id] == false) {
 			continue;
@@ -1401,9 +1388,7 @@ int export_set_up_metrics(void) {
 		send(s, buffer, strlen(buffer), 0);
 	}
 
-	// close the socket
 	close(s);
-	return 0;
 }
 
 /* main loop of the metrics exporter
@@ -1446,8 +1431,7 @@ static void metrics_main_loop(void) {
 	uint64_t as_rate_limited_counter = 0;
 	uint64_t rate_limited_counter = 0;
 
-	// export system configuarion and set-up IPC socket
-	ret = export_set_up_metrics();
+	export_set_up_metrics();
 
 	saun.sun_family = AF_UNIX;
 	strcpy(saun.sun_path, ADDRESS);
@@ -1565,28 +1549,26 @@ static void metrics_main_loop(void) {
 			total_rate_limited_counter = 0;
 
 			// collect for each AS the key-store information
-			struct dictionary *dict;
-			dict = key_dictinionary[key_manager_core_id];
+			struct key_dictionary *d = key_dictionaries[key_manager_core_id];
 
-			for (int i = 0; i < dict->length; i++) {
-				if (dict->table[i] != 0) {
-					struct keynode *k = dict->table[i];
-					while (k) {
-						uint32_t index = k->key_store->index;
-						delegation_secret *key = k->key_store->key_store->drkeys[index];
+			for (size_t i = 0; i < d->size; i++) {
+				if (d->table[i] != NULL) {
+					struct key_dictionary_node *n = d->table[i];
+					while (n != NULL) {
+						struct delegation_secret *ds =
+							&n->value->key_store->delegation_secrets[n->value->key_index];
 						snprintf(buffer, sizeof buffer,
-							"key_stats;%" PRIu64 ";%" PRIu64 ";%" PRIu32 ";%" PRIu32 ";%" PRIu32 ";%" PRIu32
-							";fin\n",
-							k->key, k->key_store->nb_key_rollover, key->epoch_begin, key->epoch_end,
-							KEY_CHECK_INTERVAL, KEY_GRACE_PERIOD);
+							"key_stats;%" PRIu64 ";%" PRIi64 ";%" PRIi64 ";%" PRIi64 ";%" PRIi64 ";fin\n", n->key,
+							ds->validity_not_before, ds->validity_not_after, min_key_validity,
+							max_key_validity_extension);
 						send(s, buffer, strlen(buffer), 0);
-						k = k->next;
+						n = n->next;
 					}
 				}
 			}
 			close(s);
 
-#if MEASURE_CYCLES
+#if ENABLE_MEASUREMENTS
 
 			/* cylce analysis code *
 			 * take average across all cores for each pipeline step and print
@@ -1765,116 +1747,243 @@ static void metrics_main_loop(void) {
 }
 
 /*
- * function to set up the key-manager and to fetch all necessary AS delegation secrets
- * in order for the LightningFilter to function. Generally the design works as described in
- * https://github.com/scionproto/scion/blob/master/doc/DRKeyInfra.md
- * For each AS we have a ring-buffer that stores the three current (previous current, net)
- * delegation secrets (DS) the key manager will replace old keys with new ones
+ * init_key_manager sets up the key management data structures. For background information on the
+ * general design, see
+ * https://github.com/scionproto/scion/blob/master/doc/cryptography/DRKeyInfra.md
  */
 static void init_key_manager(void) {
-	uint64_t as;
-	dictionary *dict;
-	uint32_t now = time(NULL);
-
-	int initial_size = 32;
-	MINIMUM_KEY_VALIDITY =
-		36000; // default value one day. if no key has shorter validity, we check at least every hour.
-
-	// initialize key dictionaries for every lcore
-	printf("KEY_MANAGER::initialize directories\n");
-	for (int core_id = 0; core_id < RTE_MAX_LCORE; core_id++) {
-		if (is_in_use[core_id] == false) {
+	for (size_t core_id = 0; core_id < RTE_MAX_LCORE; core_id++) {
+		RTE_ASSERT(core_id < sizeof is_in_use / sizeof is_in_use[0]);
+		if (!is_in_use[core_id]) {
 			continue;
 		}
-		dictionary *dict = dic_new(initial_size);
-		key_dictinionary[core_id] = dict;
+		struct key_dictionary *d = key_dictionary_new(DEFAULT_KEY_DICTIONARY_SIZE);
+		if (d == NULL) {
+			rte_exit(EXIT_FAILURE, "Allocation of key dictionary failed.\n");
+		}
+		RTE_ASSERT(core_id < sizeof key_dictionaries / sizeof key_dictionaries[0]);
+		key_dictionaries[core_id] = d;
 	}
 
-	// for each initial AS create key_storage and add it to the lcore dictionaries
-	printf("KEY_MANAGER::starting key store init\n");
-	for (uint8_t key_index = 0; key_index < config_nb_keys; key_index++) {
-		key_storage *key_storage =
-			malloc(sizeof *key_storage); // allocate one lcore-shared keystore for each AS.
-		as = config_keys[key_index];
-
-		printf("KEY_MANAGER::initializing key_store for AS: %" PRIu64 "\n", as);
-		for (int core_id = 0; core_id < RTE_MAX_LCORE; core_id++) {
-			if (is_in_use[core_id] == false) {
+	for (size_t k = 0; k < config_nb_keys; k++) {
+		uint64_t src_ia = config_keys[k];
+		struct key_store *key_store = malloc(sizeof *key_store);
+		if (key_store == NULL) {
+			rte_exit(EXIT_FAILURE, "Allocation of key store failed.\n");
+		}
+		memset(key_store, 0, sizeof *key_store);
+		for (size_t core_id = 0; core_id < RTE_MAX_LCORE; core_id++) {
+			if (!is_in_use[core_id]) {
 				continue;
 			}
-
-			// for every lcore create a key-store node whihc points to the shared keystore
-			key_store_node *key_store_node = malloc(sizeof *key_store_node);
-			key_store_node->index = 0;
-			key_store_node->key_store = key_storage;
-			dict = key_dictinionary[core_id];
-			dic_add(dict, as, key_store_node);
+			struct key_store_node *n = malloc(sizeof *n);
+			if (n == NULL) {
+				rte_exit(EXIT_FAILURE, "Allocation of key store node failed.\n");
+			}
+			n->key_index = 0;
+			n->key_store = key_store;
+			int r = key_dictionary_add(key_dictionaries[core_id], src_ia, n);
+			if (r == -1) {
+				rte_exit(EXIT_FAILURE, "Registration of key store node failed.\n");
+			}
+			RTE_ASSERT(r == 0);
 		}
 	}
 
-	// next the key manager will fetch the initial keys for every as (current and next key)
-	// for every new key we check wether the minimum key validity (check interval) changes
-	dict = key_dictinionary[key_manager_core_id];
-	for (uint8_t key_index = 0; key_index < config_nb_keys; key_index++) {
-		as = config_keys[key_index];
-
-		uint32_t next_time;
-		delegation_secret *key;
-		key_storage *key_storage;
-
-		dic_find(dict, as);
-		key_storage = dict->value->key_store;
-
-		// get first key
-		key = malloc(sizeof *key);
-		get_DRKey(now, as, key);
-		MINIMUM_KEY_VALIDITY = MIN(MINIMUM_KEY_VALIDITY, (key->epoch_end - key->epoch_begin));
-		next_time = key->epoch_end;
-		key_storage->drkeys[0] = key;
-		// get next key
-		key = malloc(sizeof *key);
-		get_DRKey(next_time, as, key);
-		key_storage->drkeys[1] = key;
-		MINIMUM_KEY_VALIDITY = MIN(MINIMUM_KEY_VALIDITY, (key->epoch_end - key->epoch_begin));
-	}
-	// we define the key check interval (how often we check whether there is a new key for any AS)
-	// as a 10th of the minimum key validity
-	KEY_CHECK_INTERVAL = MINIMUM_KEY_VALIDITY / 10;
+	min_key_validity = DEFAULT_KEY_VALIDITY;
 }
 
-/*
- * this is the main loop of the key manager
- * while the system is running we check for new keys or keys that can be replaced.
- * We check perdiodically according to the key check interval
- */
-static void key_manager_main_loop(void) {
-	printf("KEY MANAGER HAS STARTED\n");
+#if LOG_DELEGATION_SECRETS
+static void print_delegation_secret(
+	uint64_t src_ia, uint64_t dst_ia, int64_t val_time, struct delegation_secret *ds) {
+	struct tm *gmt;
+	printf("DS key (srcIA = %lx, dstIA = %lx) ", src_ia, dst_ia);
+	gmt = gmtime((time_t *)&val_time);
+	if (gmt != NULL) {
+		printf("at %04d-%02d-%02d'T'%02d:%02d:%02d'Z' = ", 1900 + gmt->tm_year, 1 + gmt->tm_mon,
+			gmt->tm_mday, gmt->tm_hour, gmt->tm_min, gmt->tm_sec);
+	} else {
+		printf("= ");
+	}
+	for (size_t i = 0; i < sizeof ds->key; i++) {
+		printf("%02x", ds->key[i]);
+	}
+	printf(", epoch = [");
+	gmt = gmtime((time_t *)&ds->validity_not_before);
+	if (gmt != NULL) {
+		printf("%04d-%02d-%02d'T'%02d:%02d:%02d'Z'", 1900 + gmt->tm_year, 1 + gmt->tm_mon, gmt->tm_mday,
+			gmt->tm_hour, gmt->tm_min, gmt->tm_sec);
+	}
+	printf(", ");
+	gmt = gmtime((time_t *)&ds->validity_not_after);
+	if (gmt != NULL) {
+		printf("%04d-%02d-%02d'T'%02d:%02d:%02d'Z'", 1900 + gmt->tm_year, 1 + gmt->tm_mon, gmt->tm_mday,
+			gmt->tm_hour, gmt->tm_min, gmt->tm_sec);
+	}
+	printf("]\n");
+}
+#endif
 
-	struct dictionary *dict;
-	dict = key_dictinionary[key_manager_core_id];
+static int fetch_delegation_secret(
+	uint64_t src_ia, uint64_t dst_ia, int64_t val_time, struct delegation_secret *ds) {
+	int r;
+#if ENABLE_KEY_MANAGEMENT
+	char sciondAddr[] = "127.0.0.1:30255";
+	memset(ds, 0, sizeof *ds);
+	RTE_ASSERT(sizeof ds->validity_not_before == sizeof(GoInt64));
+	RTE_ASSERT(sizeof ds->validity_not_after == sizeof(GoInt64));
+	r = GetDelegationSecret(sciondAddr, src_ia, dst_ia, val_time, (GoInt64 *)&ds->validity_not_before,
+		(GoInt64 *)&ds->validity_not_after, ds->key);
+	if (r != 0) {
+		RTE_ASSERT(r == -1);
+		usleep(500 * 1000);
+	}
+#else
+	(void)src_ia;
+	(void)dst_ia;
+	int64_t m = val_time % DEFAULT_KEY_VALIDITY;
+	if (m < 0) {
+		m += DEFAULT_KEY_VALIDITY;
+	}
+	if (INT64_MIN + m <= val_time) {
+		ds->validity_not_before = val_time - m;
+	} else {
+		ds->validity_not_before = INT64_MIN;
+	}
+	if (ds->validity_not_before <= INT64_MAX - DEFAULT_KEY_VALIDITY) {
+		ds->validity_not_after = ds->validity_not_before + DEFAULT_KEY_VALIDITY;
+	} else {
+		ds->validity_not_after = INT64_MAX;
+	}
+	memset(ds->key, 0, sizeof ds->key);
+	r = 0;
+#endif
+#if LOG_DELEGATION_SECRETS
+	print_delegation_secret(src_ia, dst_ia, val_time, ds);
+#endif
+	return r;
+}
 
-	while (!force_quit) {
-		// do for every AS
-		for (int i = 0; i < dict->length; i++) {
-			if (dict->table[i] != 0) {
-				struct keynode *k = dict->table[i];
-				while (k) {
-					check_and_fetch(k->key_store, k->key); // check and possibly fetch new keys for this AS
-					k = k->next;
+static void fetch_delegation_secrets(
+	struct key_store_node *n, uint64_t src_ia, uint64_t dst_ia, int64_t val_time) {
+	struct key_store *s = n->key_store;
+	RTE_ASSERT(sizeof s->delegation_secrets / sizeof s->delegation_secrets[0] == 3);
+	struct delegation_secret ds;
+	int r = fetch_delegation_secret(src_ia, dst_ia, val_time, &ds);
+	if (r == 0) {
+		RTE_ASSERT(ds.validity_not_before < ds.validity_not_after);
+		s->delegation_secrets[0] = ds;
+		int64_t key_validity = ds.validity_not_after - ds.validity_not_before;
+		if (key_validity < min_key_validity) {
+			min_key_validity = key_validity;
+		}
+		if (ds.validity_not_after != INT64_MAX) {
+			struct delegation_secret next;
+			r = fetch_delegation_secret(src_ia, dst_ia, ds.validity_not_after + 1, &next);
+			if (r == 0) {
+				RTE_ASSERT(next.validity_not_before < next.validity_not_after);
+				s->delegation_secrets[1] = next;
+				key_validity = next.validity_not_after - next.validity_not_before;
+				if (key_validity < min_key_validity) {
+					min_key_validity = key_validity;
 				}
 			}
 		}
-
-		KEY_CHECK_INTERVAL = MINIMUM_KEY_VALIDITY / 10;
-
-		// sleep in one second chunks until the key check interval is over
-		// this avoids hot spinning while alowing force quits
-		for (uint32_t i = 0; i < KEY_CHECK_INTERVAL; i++) {
-			sleep(1);
-			if (force_quit) {
-				break;
+		if (ds.validity_not_before != INT64_MIN) {
+			struct delegation_secret prev;
+			r = fetch_delegation_secret(src_ia, dst_ia, ds.validity_not_before - 1, &prev);
+			if (r == 0) {
+				// RTE_ASSERT(prev.validity_not_before < prev.validity_not_after);
+				s->delegation_secrets[2] = prev;
+				key_validity = prev.validity_not_after - prev.validity_not_before;
+				if (key_validity < min_key_validity) {
+					min_key_validity = key_validity;
+				}
 			}
 		}
+	}
+}
+
+static void check_adjacent_delegation_secrets(
+	struct key_store_node *n, uint64_t src_ia, uint64_t dst_ia) {
+	struct key_store *s = n->key_store;
+	RTE_ASSERT(sizeof s->delegation_secrets / sizeof s->delegation_secrets[0] == 3);
+	struct delegation_secret *ds = &s->delegation_secrets[n->key_index];
+	RTE_ASSERT(ds->validity_not_before < ds->validity_not_after);
+	if (ds->validity_not_after != INT64_MAX) {
+		size_t next_key_index = NEXT_KEY_INDEX(n->key_index);
+		struct delegation_secret *next_ds = &s->delegation_secrets[next_key_index];
+		if ((next_ds->validity_not_before >= next_ds->validity_not_after)
+				|| (ds->validity_not_after >= next_ds->validity_not_after))
+		{
+			struct delegation_secret next;
+			int r = fetch_delegation_secret(src_ia, dst_ia, ds->validity_not_after + 1, &next);
+			if (r == 0) {
+				RTE_ASSERT(next.validity_not_before < next.validity_not_after);
+				*next_ds = next;
+				int64_t key_validity = next.validity_not_after - next.validity_not_before;
+				if (key_validity < min_key_validity) {
+					min_key_validity = key_validity;
+				}
+			}
+		}
+	}
+	if (ds->validity_not_before != INT64_MIN) {
+		size_t prev_key_index = PREV_KEY_INDEX(n->key_index);
+		struct delegation_secret *prev_ds = &s->delegation_secrets[prev_key_index];
+		if ((prev_ds->validity_not_before >= prev_ds->validity_not_after)
+				|| (ds->validity_not_before <= prev_ds->validity_not_before))
+		{
+			struct delegation_secret prev;
+			int r = fetch_delegation_secret(src_ia, dst_ia, ds->validity_not_before - 1, &prev);
+			if (r == 0) {
+				// RTE_ASSERT(prev.validity_not_before < prev.validity_not_after);
+				*prev_ds = prev;
+				int64_t key_validity = prev.validity_not_after - prev.validity_not_before;
+				if (key_validity < min_key_validity) {
+					min_key_validity = key_validity;
+				}
+			}
+		}
+	}
+}
+
+static void key_manager_main_loop(void) {
+	printf("KEY MANAGER HAS STARTED\n");
+	RTE_ASSERT(key_manager_core_id < sizeof key_dictionaries / sizeof key_dictionaries[0]);
+	struct key_dictionary *d = key_dictionaries[key_manager_core_id];
+	RTE_ASSERT(d != NULL);
+	RTE_ASSERT(d->table != NULL);
+	int64_t i = 0;
+	while (!force_quit) {
+		if (i == 0) {
+			struct timeval tv;
+			int r = gettimeofday(&tv, NULL);
+			if (r != 0) {
+				RTE_ASSERT(r == -1);
+				rte_exit(EXIT_FAILURE, "Syscall gettimeofday failed.\n");
+			}
+			RTE_ASSERT((INT64_MIN <= tv.tv_sec) && (tv.tv_sec <= INT64_MAX));
+			int64_t t_now = tv.tv_sec;
+			for (size_t j = 0; j < d->size; j++) {
+				if (d->table[j] != NULL) {
+					struct key_dictionary_node *n = d->table[j];
+					while (n != NULL) {
+						struct delegation_secret *ds = get_delegation_secret(n->value, t_now);
+						if (ds == NULL) {
+							fetch_delegation_secrets(n->value, n->key, local_ia, t_now);
+						} else {
+							check_adjacent_delegation_secrets(n->value, n->key, local_ia);
+						}
+						n = n->next;
+					}
+				}
+			}
+		}
+		sleep(1);
+		RTE_ASSERT(min_key_validity > 0);
+		RTE_ASSERT(min_key_validity <= DEFAULT_KEY_VALIDITY);
+		i = i < min_key_validity / 10 ? i + 1 : 0;
 	}
 }
 
@@ -2055,7 +2164,8 @@ static void dos_main_loop(void) {
 				 * negative)*/
 				used_secX = core_dos_stat.secX_dos_packet_count[state];
 				if (used_secX < 0) {
-					used_secX_sum += labs(used_secX) + previous_dos_stat[core_id].secX_dos_packet_count[state];
+					used_secX_sum +=
+						labs(used_secX) + previous_dos_stat[core_id].secX_dos_packet_count[state];
 				} else {
 					used_secX_sum += previous_dos_stat[core_id].secX_dos_packet_count[state] - used_secX;
 				}
@@ -2221,7 +2331,7 @@ static void dos_main_loop(void) {
  * limits are divided by 1.042 (Magic constant, i don't no why but without the rate-limits are too
  * high)
  */
-int load_rate_limits(const char *file_name) {
+static int load_rate_limits(const char *file_name) {
 	int32_t nb_keys = 0;
 	int index = 0;
 	void *fgets_res;
@@ -2316,7 +2426,7 @@ int load_rate_limits(const char *file_name) {
  * This is done at start-up
  * The arguments are parsed and stored in the global variables
  */
-int load_config(const char *file_name) {
+static int load_config(const char *file_name) {
 	void *fgets_res;
 
 	// open file
@@ -2391,7 +2501,7 @@ int load_config(const char *file_name) {
 			if (fgets_res == NULL) {
 				return -1;
 			}
-			KEY_GRACE_PERIOD = strtol(arg, NULL, 10);
+			max_key_validity_extension = strtol(arg, NULL, 10);
 		} else if (strcmp(line, "max_pool_size_factor:\n") == 0) {
 			fgets_res = fgets(arg, sizeof arg, fp);
 			if (fgets_res == NULL) {
@@ -2413,13 +2523,22 @@ int load_config(const char *file_name) {
 	return 0;
 }
 
+/* display CLI usage */
+static void print_cli_usage(void) {
+	printf(
+		"Currently supported CLI commands:\n\n"
+		"  reload  Reloads the rate-limit config file\n"
+		"    stop  terminates the application\n"
+		"    help  Prints this info\n\n");
+}
+
 /*
  * cli read line function
  * listens only to two commands at the moment
  * can not react to ctrl+c, so user has to call stop command if
  * CL is enabled
  */
-int cli_read_line(void) {
+static int cli_read_line(void) {
 	int res;
 	char *line = NULL;
 	size_t bufsize = 0;
@@ -2441,7 +2560,7 @@ int cli_read_line(void) {
 /*
  * CLI prompt user for imput and parse the input
  */
-void prompt(void) {
+static void prompt(void) {
 	int status;
 
 	do {
@@ -2450,34 +2569,33 @@ void prompt(void) {
 	} while (status);
 }
 
-/* launch main processing core main loop */
-static int scionfwd_launch_dup_core(__attribute__((unused)) void *dummy) {
+static int scionfwd_launch_fwd_core(void *arg) {
+	(void)arg;
 	scionfwd_main_loop();
 	return 0;
 }
 
-/* launch rate-limit core main loop*/
-static int scionfwd_launch_dos_core(__attribute__((unused)) void *dummy) {
+static int scionfwd_launch_dos_core(void *arg) {
+	(void)arg;
 	dos_main_loop();
-	printf("DOS CORE HAS TERMINATED\n");
+	printf("DOS PROCESS HAS TERMINATED\n");
 	return 0;
 }
 
-/* launch metrics core main loop*/
-static int scionfwd_launch_metrics_core(__attribute__((unused)) void *dummy) {
+static int scionfwd_launch_metrics_core(void *arg) {
+	(void)arg;
 	metrics_main_loop();
-	printf("METRICS CORE HAS TERMINATED\n");
+	printf("METRICS PROCESS HAS TERMINATED\n");
 	return 0;
 }
 
-/* launch key-manager core main loop*/
-static int scionfwd_launch_key_manager_core(__attribute__((unused)) void *dummy) {
+static int scionfwd_launch_key_manager_core(void *arg) {
+	(void)arg;
 	key_manager_main_loop();
-	printf("KEY MANAGER HAS TERMINATED\n");
+	printf("KEY MANAGER PROCESS HAS TERMINATED\n");
 	return 0;
 }
 
-/* launch supervisor and CLI*/
 static int scionfwd_launch_supervisor(void) {
 	printf("SUPERVISOR HAS STARTED\n");
 	while (!force_quit) {
@@ -2493,15 +2611,6 @@ static int scionfwd_launch_supervisor(void) {
 	return 0;
 }
 
-/* display CLI usage */
-void print_cli_usage(void) {
-	printf(
-		"Currently supported CLI commands:\n\n"
-		"  reload  Reloads the rate-limit config file\n"
-		"    stop  terminates the application\n"
-		"    help  Prints this info\n\n");
-}
-
 /* display application usage */
 static void scionfwd_usage(const char *prgname) {
 	printf(
@@ -2513,9 +2622,12 @@ static void scionfwd_usage(const char *prgname) {
 		"  -l load config from scion_filter.cfg and whitelist.cfg\n"
 		"  -n enable experimental smart numa alloc\n"
 		"  -K NUM set key grace period\n"
-		"  -S PERIOD: Set slice time (default %" PRIu64 ")\n"
-		"  -E: NUM: Set num of bloom entries (default %" PRIu64 ")\n"
-		"  -R: NUM: Set reciprocal value of error rate (default %" PRIu64 ")\n"
+		"  -S PERIOD: Set slice time (default %" PRIu64
+		")\n"
+		"  -E: NUM: Set num of bloom entries (default %" PRIu64
+		")\n"
+		"  -R: NUM: Set reciprocal value of error rate (default %" PRIu64
+		")\n"
 		"  -D: us: Set value of bloom filter duration (default %i)\n",
 		prgname, slice_timer_period, NUM_BLOOM_ENTRIES, BLOOM_ERROR_RATE, delta_us);
 }
@@ -2586,13 +2698,11 @@ enum {
 
 /* again I think the long options are deprecated,
  * the did not work when I took over this project */
-static const struct option long_options[] = {
-	{ CMD_LINE_OPT_CONFIG, 1, 0, CMD_LINE_OPT_CONFIG_NUM },
+static const struct option long_options[] = { { CMD_LINE_OPT_CONFIG, 1, 0,
+																								CMD_LINE_OPT_CONFIG_NUM },
 	{ CMD_LINE_OPT_ETH_DEST, 1, 0, CMD_LINE_OPT_ETH_DEST_NUM },
 	{ CMD_LINE_OPT_MAC_UPDATING, no_argument, &mac_updating, 1 },
-	{ CMD_LINE_OPT_NO_MAC_UPDATING, no_argument, &mac_updating, 0 },
-	{ NULL, 0, 0, 0 }
-};
+	{ CMD_LINE_OPT_NO_MAC_UPDATING, no_argument, &mac_updating, 0 }, { NULL, 0, 0, 0 } };
 
 /*
  * This expression is used to calculate the number of mbufs needed
@@ -2601,12 +2711,12 @@ static const struct option long_options[] = {
  * RTE_MAX is used to ensure that NB_MBUF never goes below a minimum
  * value of 8192
  */
-#define NB_MBUF RTE_MAX( \
-		(nb_ports * nb_rx_queues_per_port * RTE_TEST_RX_DESC_DEFAULT \
-		+ nb_ports * nb_lcores * MAX_PKT_BURST \
-		+ nb_ports * (nb_tx_bypass_queues_per_port + nb_tx_firewall_queues_per_port) \
-			* RTE_TEST_TX_DESC_DEFAULT \
-		+ nb_lcores * MEMPOOL_CACHE_SIZE), \
+#define NB_MBUF \
+	RTE_MAX((nb_ports * nb_rx_queues_per_port * RTE_TEST_RX_DESC_DEFAULT \
+						+ nb_ports * nb_lcores * MAX_PKT_BURST \
+						+ nb_ports * (nb_tx_bypass_queues_per_port + nb_tx_firewall_queues_per_port) \
+								* RTE_TEST_TX_DESC_DEFAULT \
+						+ nb_lcores * MEMPOOL_CACHE_SIZE), \
 		(unsigned)8192)
 
 /* Parse the argument given in the command line of the application */
@@ -2668,7 +2778,7 @@ static int scionfwd_parse_args(int argc, char **argv) {
 
 			/* KEY GRACE PERIOD */
 			case 'K':
-				KEY_GRACE_PERIOD = scionfwd_parse_timer_period(optarg);
+				max_key_validity_extension = scionfwd_parse_timer_period(optarg);
 				break;
 
 			/* slice timer period */
@@ -2747,7 +2857,7 @@ static int init_mem(unsigned nb_mbuf) {
 	}
 
 	gso_types = DEV_TX_OFFLOAD_TCP_TSO | DEV_TX_OFFLOAD_VXLAN_TNL_TSO | DEV_TX_OFFLOAD_GRE_TNL_TSO
-		| DEV_TX_OFFLOAD_UDP_TSO;
+							| DEV_TX_OFFLOAD_UDP_TSO;
 
 	/*
 	 * Records which Mbuf pool to use by each logical core, if needed.
@@ -2800,9 +2910,8 @@ static void check_all_ports_link_status(uint8_t port_num, uint32_t port_mask) {
 			/* print link status if flag set */
 			if (print_flag == 1) {
 				if (link.link_status)
-					printf(
-						"Port %d Link Up - speed %u Mbps - %s\n",
-						(uint8_t)portid, (unsigned)link.link_speed,
+					printf("Port %d Link Up - speed %u Mbps - %s\n", (uint8_t)portid,
+						(unsigned)link.link_speed,
 						(link.link_duplex == ETH_LINK_FULL_DUPLEX) ? ("full-duplex") : ("half-duplex\n"));
 				else
 					printf("Port %d Link Down\n", (uint8_t)portid);
@@ -2841,11 +2950,7 @@ static void signal_handler(int signum) {
 	}
 }
 
-/*
- * Main function of the apllication
- * performs the entire set-up and starts all cores
- */
-int scion_filter_main(int argc, char **argv) {
+int main(int argc, char **argv) {
 	int ret;
 	int nb_active_ports;
 	uint8_t port_id, socket_id;
@@ -2860,8 +2965,7 @@ int scion_filter_main(int argc, char **argv) {
 	uint8_t cores_on_socket_1 = 0;
 
 	// set default values for two system configs
-	KEY_GRACE_PERIOD = 30;
-	SUSPICIOUS_KEY_CHANGE_RATIO = 30;
+	max_key_validity_extension = DEFAULT_KEY_VALIDITY_EXTENSION;
 	is_interactive = 0;
 
 	printf("Starting SCION FW BYPASS\n\n");
@@ -2979,6 +3083,9 @@ int scion_filter_main(int argc, char **argv) {
 	uint32_t nb_proc_cores = nb_available_cores - 4; // one master core and this core
 	nb_cores = nb_available_cores;
 	nb_slave_cores = nb_proc_cores;
+
+	RTE_ASSERT(RTE_MAX_LCORE > 0);
+	RTE_ASSERT(RTE_MAX_LCORE <= SIZE_MAX);
 
 	// print some infos
 	printf("RTE_MAX_LCORE: %d\n", RTE_MAX_LCORE);
@@ -3137,9 +3244,9 @@ int scion_filter_main(int argc, char **argv) {
 		}
 
 		printf("*************\n");
-		printf("Port %d: %02X:%02X:%02X:%02X:%02X:%02X\n", port_id,
-			mac_addr.addr_bytes[0], mac_addr.addr_bytes[1], mac_addr.addr_bytes[2],
-			mac_addr.addr_bytes[3], mac_addr.addr_bytes[4], mac_addr.addr_bytes[5]);
+		printf("Port %d: %02X:%02X:%02X:%02X:%02X:%02X\n", port_id, mac_addr.addr_bytes[0],
+			mac_addr.addr_bytes[1], mac_addr.addr_bytes[2], mac_addr.addr_bytes[3],
+			mac_addr.addr_bytes[4], mac_addr.addr_bytes[5]);
 		printf("Socket ID : %d\n", port_socket_id);
 
 		// calculate the actual number of queues to configure
@@ -3207,8 +3314,6 @@ int scion_filter_main(int argc, char **argv) {
 					printf("Initializing rx queue on lcore %u ... ", core_id);
 					printf("rxq=%d,%d,%d,%p\n", lvars->rx_port_id, lvars->rx_queue_id, socket_id, mbp);
 					fflush(stdout);
-
-					// rte_spinlock_init(&rx_locks[lvars->rx_queue_id]);
 
 					// set up queue
 					ret = rte_eth_rx_queue_setup(
@@ -3281,8 +3386,6 @@ int scion_filter_main(int argc, char **argv) {
 					printf("Initializing tx bypass queue on lcore %u ... ", core_id);
 					printf("txq=%d,%d,%d,%p\n", lvars->rx_port_id, lvars->rx_queue_id, socket_id, mbp);
 					fflush(stdout);
-
-					// rte_spinlock_init(&tx_locks[lvars->tx_bypass_queue_id]);
 
 					// set-up queue
 					ret = rte_eth_tx_queue_setup(
@@ -3428,7 +3531,7 @@ int scion_filter_main(int argc, char **argv) {
 
 	slice_timer_period *= rte_get_timer_hz();
 
-#if MEASURE_CYCLES
+#if ENABLE_MEASUREMENTS
 	tsc_hz = rte_get_tsc_hz();
 #endif
 
@@ -3439,12 +3542,16 @@ int scion_filter_main(int argc, char **argv) {
 			bloom_init(&core_vars[i].bloom_filters[j], NUM_BLOOM_ENTRIES, BLOOM_ERROR_RATE);
 		}
 		core_vars[i].active_filter_id = 0;
-		gettimeofday(&core_vars[i].last_ts, NULL);
+		int r = gettimeofday(&core_vars[i].last_ts, NULL);
+		if (r != 0) {
+			RTE_ASSERT(r == -1);
+			rte_exit(EXIT_FAILURE, "Syscall gettimeofday failed.\n");
+		}
 		char core_id_string[12];
 		sprintf(core_id_string, "%d", i);
 	}
 
-	// init key_storage
+	// init key_store
 	init_key_manager();
 
 	// initializzr the rate-limiter
@@ -3474,7 +3581,7 @@ int scion_filter_main(int argc, char **argv) {
 			continue;
 		}
 		if (is_slave_core[core_id]) {
-			rte_eal_remote_launch(scionfwd_launch_dup_core, NULL, core_id);
+			rte_eal_remote_launch(scionfwd_launch_fwd_core, NULL, core_id);
 		}
 	}
 
@@ -3502,7 +3609,7 @@ int scion_filter_main(int argc, char **argv) {
 		rte_eth_dev_close(port_id);
 		printf(" Done\n");
 	}
-#if MEASURE_CYCLES
+#if ENABLE_MEASUREMENTS
 #endif
 
 	printf("Shutdown complete\n");

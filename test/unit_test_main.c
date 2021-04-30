@@ -62,10 +62,10 @@ int unit_test_main(void)
 		cmocka_unit_test(test_check_and_fetch_grace_period),
 		cmocka_unit_test(test_check_and_fetch_grace_suspicious_short),
 		cmocka_unit_test(test_check_and_fetch_grace_suspicious_long),
-		cmocka_unit_test(test_get_DRKey),
-		cmocka_unit_test(test_get_DRKey_mock_AS),
-		cmocka_unit_test(test_get_DRKey_mock_epoch),
-		cmocka_unit_test(test_get_DRKey_mock_key_state),
+		cmocka_unit_test(test_fetch_delegation_secret),
+		cmocka_unit_test(test_fetch_delegation_secret_mock_AS),
+		cmocka_unit_test(test_fetch_delegation_secret_mock_epoch),
+		cmocka_unit_test(test_fetch_delegation_secret_mock_key_state),
 
 		// hashdict
         cmocka_unit_test(hashdict_create),

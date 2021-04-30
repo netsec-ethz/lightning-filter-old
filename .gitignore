@@ -1,7 +1,4 @@
-*.vs
-*settings
-*.scproject
-*.project
-*.o
 *.a
+*.o
 src/build/
+src/lib/drkey/libdrkey.h

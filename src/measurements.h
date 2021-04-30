@@ -1,7 +1,7 @@
-#ifndef _CYCLE_MEASUREMENTS_H_
-#define _CYCLE_MEASUREMENTS_H_
+#ifndef _MEASUREMENTS_H_
+#define _MEASUREMENTS_H_
 
-typedef struct cycle_counts {
+struct measurements {
 	uint64_t dup_start;
 	uint64_t dup_sum;
 	uint64_t dup_cnt;
@@ -49,6 +49,6 @@ typedef struct cycle_counts {
 	uint64_t secX_cmac_start;
 	uint64_t secX_cmac_sum;
 	uint64_t secX_cmac_cnt;
-}cycle_counts;
+};
 
 #endif
