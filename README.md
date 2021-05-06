@@ -1,54 +1,79 @@
-This is the README for the Lightning filter prototype.
+# Proof-of-concept implementation of Lightning Filter together with DRKey on top of today's Internet
 
-## Dependencies
-In order to build the project, you will need:
-- dpdk 19.05 installed in the home directory, with the name `~/dpdk-19.05`
-- gcc 5
-- yasm
-- go 1.11
+## Introduction
+As part of the ongoing Lightning Filter project, we have shown that packets can be extremely fast authenticated on a single commodity server core at the network layer. Thanks to the DRKey system [1] this can be achieved without persistent per-sender state at the receiving end host. Based on this property we aim to implement a high-speed packet-filtering system for AWS EC2 deployments that scales to very high rates of traffic. Even though we are starting out with deployments on AWS EC2, the resulting software will also be available for use on other cloud platforms and on premises.
 
-## The directory contains the following:
+AWS offers a mechanism called Virtual Private Cloud (VPC) ingress routing [2] to redirect incoming traffic through virtual appliances. In a typical VPC setup, Lightning Filter will be placed in a separate subnet from the subnets of the actual end hosts. At the Internet gateway all traffic intended for protected end hosts is routed to one or more Lightning Filter instances (parameterized with address prefix lists consisting of one or more CIDR blocks). This way it can be guaranteed that no unfiltered traffic from the Internet will ever reach the protected subnets. As an implementation restriction of AWS VPC, return traffic from a destination subnet must be routed back through the same (inbound) Lightning Filter appliance to the Internet gateway, i.e., asymmetric routing is not supported. Actual traffic triage is implemented in Lightning Filter for AWS by rewriting source and destination MAC addresses based on the particular filtering decisions. Packets that are allowed to pass through to protected end hosts are directed to the local default gateway whereas other traffic can either be dropped, forwarded to downstream firewall appliances for further inspection, or this traffic can be directly forwarded in a best-effort manner to the protected end host.
 
-- src/
-contains the entire source code for the Lightning filter, more specifically all C source files.
-src/config7 contains the config files, which can be modified, although the format specification must not be changed.
-src/lib/ contains the necessary dependencies, especially the CMAC assembly implementation and the key_manager.so file.
-The src directory provides a build.sh script and a run.sh script, for more information how to run the code,
-consult the RUN_INSTRUCTIONS.md file. To build we use make.
+For proof-of-concept deployments, not only ingress traffic is routed through Lightning Filter but also all outgoing traffic originating from a protected end host. This allows to add the required filtering information (like timestamps, MACs, and payload hashes) in the form of a custom header on the packet's way out to the Internet. The custom header will then be extracted and stripped out again at the receiving Lightning Filter instance. Packets without the custom Lightning Filter header will be handled without increased availability guarantees on a best-effort basis.
 
-- go/
-contains all go source code. More specifically the metrics_exporter and the key_manager.
-The metrics exporter must be run in addition to the Lightning filter if metrics shall be exported.
-The key_manager subdirectory contains a script to compile and move the library to the correct location.
+## Deploying Lightning Filter
 
-- test/
-contains the source code files for the unit tests. For unit testing we use cmocka. Due to difficulties with building,
-the unit tests are currently integrated into the application itself and are always run if the main unit test call is
-not commented out in the application.c file.
+Reference platform: AWS EC2 instances of type c5n.18xlarge running Amazon Linux 2.
 
-- prometheus_config/
-contains a simple config file for Prometheus in order to create a job
-for both the metrics exporter and the Prometheus node exporter
+```
+cd ~
+sudo yum -y update
+sudo yum -y groupinstall "Development Tools"
+sudo yum -y install numactl-devel libpcap-devel pciutils cmake lshw
 
-- spirent/
-contains the Spirent config files that were used during this thesis for evaluation purposes. They can be used as a
-reference when creating new streamBlocks.
+cd ~
+curl -LO http://fast.dpdk.org/rel/dpdk-19.11.6.tar.xz
+echo "2119ea66cf2d1576cc37655901762fc7 dpdk-19.11.6.tar.xz" | md5sum -c
+tar xfv dpdk-19.11.6.tar.xz 
+cd dpdk-stable-19.11.6/
+export RTE_SDK=$(pwd)
+make defconfig
+make
 
-- pcap/
-contains a number of pcap files with different SCION packets that can be used to create new streamBlocks in Spirent.
-The directory contains to scripts to generate new pcap file. However, these scripts are very simple and must be modified
-for any specific generator changes.
+cd ~
+curl -LO https://www.tortall.net/projects/yasm/releases/yasm-1.3.0.tar.gz
+echo "3dce6601b495f5b3d45b59f7d2492a340ee7e84b5beca17e48f862502bd5603f  yasm-1.3.0.tar.gz" | sha256sum -c
+tar xzfv yasm-1.3.0.tar.gz
+cd yasm-1.3.0
+./configure
+make
+sudo make install
 
-## Structure and Modifications
-The project is an extension of two previous projects, thus there are a few artifacts left in the codebase.
-There are some, in retrospect, questionable design decisions and the code is not optimally structured. This is largely a consequence
-of having multiple authors and last minute design changes.
+cd ~
+curl -LO https://golang.org/dl/go1.16.3.linux-amd64.tar.gz
+echo "951a3c7c6ce4e56ad883f97d9db74d3d6d80d5fec77455c6ada6c1f7ac4776d2 go1.16.3.linux-amd64.tar.gz" | sha256sum -c
+sudo tar -C /usr/local -xzf go1.16.3.linux-amd64.tar.gz
+echo >> .bash_profile
+echo 'export PATH=$PATH:/usr/local/go/bin' >> .bash_profile
+source ~/.bash_profile
 
-In general the most important source file is the scionfwd.c source file.
-For anyone aiming to understand the code or wishing to extend the project, these functions are essential to understand:
+cd ~
+sudo su
+echo "vm.nr_hugepages=4096" >> /etc/sysctl.conf
+echo "kernel.randomize_va_space=0" >> /etc/sysctl.conf
+reboot
+```
 
-- scion_filter_main() contains the entire DPDK set-up (port, lcore, memory and queue allocation)
-- scionfwd_main_loop() contains the main processing core loop (data-plane)
-- scionfwd_should_forward() contains the decision logic for the data-plane
-- key_manager_main_init() & key_manager_main_loop() contain the key-manager code
-- dos_init() & dos_main_loop() contain the rate-limiter code
+## Building Lightning Filter
+
+Uncompress the source archive and change to the Lightning Filter directory, update the section `LF configuration` in `src/scionfwd.c`, update `config/end_hosts.cfg`, and issue
+
+```
+cd src
+./build.sh
+```
+
+## Running Lightning Filter
+
+Attach a second Elastic Network Interface to the Lightning Filter instance and set up VPC ingress routing. Then change to the Lightning Filter directory and issue
+
+```
+sudo modprobe uio
+sudo insmod ~/dpdk-stable-19.11.6/build/kmod/igb_uio.ko
+sudo ifconfig eth1 down
+sudo ~/dpdk-stable-19.11.6/usertools/dpdk-devbind.py --bind=igb_uio 0000:00:06.0
+
+sudo src/build/app/scionfwd -c 0x00003ffff00003ffff -- -r 0x1 -x 0x1 -y 0x1 -l -i -K 1 -S 5 -E 750000 -R 10000 -D 2500000
+```
+
+## References
+
+[1] Benjamin Rothenberger, Dominik Roos, Markus Legner, and Adrian Perrig. 2020. PISKES: Pragmatic Internet-Scale Key-Establishment System. In Proceedings of the ACM Asia Conference on Computer and Communications Security (ASIACCS). https://doi.org/10.1145/3320269.3384743
+
+[2] Sébastien Stormacq. 2019. VPC Ingress Routing: Simplifying Integration of Third-Party Appliances. https://aws.amazon.com/blogs/aws/new-vpc-ingress-routing-simplifying-integration-of-third-party-appliances

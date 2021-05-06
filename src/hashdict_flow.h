@@ -1,3 +1,8 @@
+/*
+ * Based on the project exebook/hashdict.c
+ * See https://github.com/exebook/hashdict.c
+ */
+
 #ifndef _HASH_DICTC_FLOW_H_
 #define _HASH_DICTC_FLOW_H_
 
@@ -33,14 +38,6 @@ struct dictionary_flow {
 	double growth_factor;
 	dos_counter *value;
 } __rte_cache_aligned;
-
-/* See hashdict_README.md */
-
-/* This is essentially the same code as in hashdict.h and hashdict.c
- * However, since they contain differnt nodes, it is split in two files
- * This causes a lot of boilerplate, and a better way would be to have a generic
- * value type I assume
- */
 
 struct dictionary_flow *dic_new_flow(int initial_size);
 void dic_delete_flow(struct dictionary_flow *dic);

@@ -1,3 +1,8 @@
+/*
+ * Based on the project exebook/hashdict.c
+ * See https://github.com/exebook/hashdict.c
+ */
+
 #ifndef _KEY_DICTIONARY_H_
 #define _KEY_DICTIONARY_H_
 

@@ -1,3 +1,8 @@
+/*
+ * Based on the project exebook/hashdict.c
+ * See https://github.com/exebook/hashdict.c
+ */
+
 #include <assert.h>
 #include <stdbool.h>
 

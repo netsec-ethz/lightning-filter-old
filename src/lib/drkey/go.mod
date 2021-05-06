@@ -1,4 +1,4 @@
-module github.com/netsec-ethz/lightning-filter
+module example.com/lightning-filter
 
 go 1.16
 

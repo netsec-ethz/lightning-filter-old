@@ -1,10 +1,14 @@
+/*
+ * Based on the project exebook/hashdict.c
+ * See https://github.com/exebook/hashdict.c
+ */
+
 #include <inttypes.h>
 
 #include "hashdict_flow.h"
 
 #define hash_func_flow splitmix_flow
 
-// internal prototypes
 uint64_t splitmix_flow(uint64_t x);
 struct keynode_flow *keynode_new_flow(uint64_t key, dos_counter *value);
 void keynode_delete_flow(struct keynode_flow *node);

@@ -1,34 +1,9 @@
-/*-
- *   BSD LICENSE
+/*
+ * Copyright (c) 2021, [fullname]
+ * All rights reserved.
  *
- *   Copyright(c) 2010-2016 Intel Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Based on DPDK examples
+ * Copyright (c) 2010-2016 Intel Corporation 
  */
 
 #include <ctype.h>
@@ -172,7 +147,7 @@ static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
  * LF configuration
  */
 
-static uint64_t local_ia = 0x0013ffaa00010eed;
+static uint64_t local_ia = 0x0000000000000000;
 
 struct backend {
 	rte_be32_t private_addr;
@@ -180,22 +155,18 @@ struct backend {
 	rte_be64_t ia;
 };
 
-struct backend backends[] = {
-	{ .private_addr = 0xc5301fac /* 172.31.48.197 */,
-		.public_addr = 0xb9ddb912 /* 18.185.221.185 */,
-		.ia = 0x0011ffaa00010d69 },
-	{ .private_addr = 0x543a1fac /* 172.31.58.84 */,
-		.public_addr = 0x87dec612 /* 18.198.222.135 */,
-		.ia = 0x0011ffaa00010e97 },
+static struct backend backends[] = {
+	{ .private_addr = 0x00000000 /* big endian */,
+		.public_addr = 0x00000000 /* big endian */,
+		.ia = 0x0000000000000000 },
 };
 
 struct peer {
 	rte_be32_t public_addr;
 };
 
-struct peer peers[] = {
-	{ .public_addr = 0x87dec612 /* 18.198.222.135 */ },
-	{ .public_addr = 0xb9ddb912 /* 18.185.221.185 */ },
+static struct peer peers[] = {
+	{ .public_addr = 0x00000000 /* big endian */ },
 };
 
 /**
