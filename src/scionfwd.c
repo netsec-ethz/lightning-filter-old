@@ -3,7 +3,7 @@
  * All rights reserved.
  *
  * Based on DPDK examples
- * Copyright (c) 2010-2016 Intel Corporation 
+ * Copyright (c) 2010-2016 Intel Corporation
  */
 
 #include <ctype.h>
@@ -2618,9 +2618,6 @@ static int scionfwd_parse_portmask(const char *portmask) {
 	if ((portmask[0] == '\0') || (end == NULL))
 		return -1;
 
-	if (pm == 0)
-		return -1;
-
 	return pm;
 }
 
@@ -2730,11 +2727,6 @@ static int scionfwd_parse_args(int argc, char **argv) {
 			/* firewall ports */
 			case 'y':
 				scionfwd_tx_firewall_port_mask = scionfwd_parse_portmask(optarg);
-				if (scionfwd_tx_firewall_port_mask == 0) {
-					printf("invalid tx port mask\n");
-					scionfwd_usage(prgname);
-					return -1;
-				}
 				break;
 
 			/* enable interactive mode */
@@ -3082,9 +3074,16 @@ int main(int argc, char **argv) {
 
 	/* calculate queues and lcores per port */
 	/* we assume that ratio of slave cores per socket matches the ratio of ports per socket */
+	RTE_ASSERT(nb_rx_ports != 0);
 	uint8_t nb_rx_queues_per_port = nb_slave_cores / nb_rx_ports;
+	RTE_ASSERT(nb_tx_bypass_ports != 0);
 	uint8_t nb_tx_bypass_queues_per_port = nb_slave_cores / nb_tx_bypass_ports;
-	uint8_t nb_tx_firewall_queues_per_port = 0; // nb_slave_cores/nb_tx_firewall_ports/2;
+	uint8_t nb_tx_firewall_queues_per_port;
+	if (nb_tx_firewall_ports == 0) {
+		nb_tx_firewall_queues_per_port = 0;
+	} else {
+		nb_tx_firewall_queues_per_port = nb_slave_cores / nb_tx_firewall_ports;
+	}
 
 	printf("nb_rx_queues_per_port: %d\n", nb_rx_queues_per_port);
 	printf("nb_tx_bypass_queues_per_port: %d\n", nb_tx_bypass_queues_per_port);
@@ -3265,16 +3264,15 @@ int main(int argc, char **argv) {
 		printf("\n\nInitializing port %d ... \n", port_id);
 		// allocate rx cores
 		int queue_id = 0;
-		int queue_id_2 = 0;
 		for (int core_id = 0; core_id < RTE_MAX_LCORE; core_id++) {
 			if (is_slave_core[core_id] == false) {
 				continue;
 			}
-			// if (numa_on) { // only use cores on the same socket
-			// 	if (rte_lcore_to_socket_id(core_id) != port_vars[port_id].socket_id) {
-			// 		continue;
-			// 	}
-			// }
+			if (numa_on) { // only use cores on the same socket
+				if (rte_lcore_to_socket_id(core_id) != port_vars[port_id].socket_id) {
+					continue;
+				}
+			}
 
 			struct lcore_values *lvars = &core_vars[core_id];
 
@@ -3282,7 +3280,7 @@ int main(int argc, char **argv) {
 				if (rte_lcore_to_socket_id(core_id) == port_vars[port_id].socket_id) {
 					lvars->rx_port_id = port_id;
 					lvars->rx_queue_id = queue_id;
-					port_vars[port_id].rx_slave_core_ids[queue_id + queue_id_2] = core_id;
+					port_vars[port_id].rx_slave_core_ids[queue_id] = core_id;
 					struct rte_mempool *mbp = lvars->mbp;
 
 					socket_id = (uint8_t)rte_lcore_to_socket_id(core_id);
@@ -3299,25 +3297,12 @@ int main(int argc, char **argv) {
 					}
 
 					queue_id++;
-				} else {
-					lvars->rx_port_id = port_id;
-					lvars->rx_queue_id = queue_id_2;
-					port_vars[port_id].rx_slave_core_ids[queue_id + queue_id_2] = core_id;
-					struct rte_mempool *mbp = lvars->mbp;
-
-					socket_id = (uint8_t)rte_lcore_to_socket_id(core_id);
-
-					printf("Initializing rx queue on lcore %u ... ", core_id);
-					printf("rxq=%d,%d,%d,%p\n", lvars->rx_port_id, lvars->rx_queue_id, socket_id, mbp);
-					fflush(stdout);
-
-					queue_id_2++;
 				}
 			}
 
-			// if (queue_id >= nb_rx_queues_per_port) {
-			// 	break;
-			// }
+			if (queue_id >= nb_rx_queues_per_port) {
+				break;
+			}
 		}
 	}
 
@@ -3332,18 +3317,17 @@ int main(int argc, char **argv) {
 		printf("\n\nInitializing port %d ... \n", port_id);
 		// allocate tx cores
 		int queue_id = 0;
-		int queue_id_2 = 0;
 
 		// bypass ports
 		for (int core_id = 0; core_id < RTE_MAX_LCORE; core_id++) {
 			if (is_slave_core[core_id] == false || is_tx_bypass_port[port_id] == false) {
 				continue;
 			}
-			// if (numa_on) { // only use cores on the same socket
-			// 	if (rte_lcore_to_socket_id(core_id) != port_vars[port_id].socket_id) {
-			// 		continue;
-			// 	}
-			// }
+			if (numa_on) { // only use cores on the same socket
+				if (rte_lcore_to_socket_id(core_id) != port_vars[port_id].socket_id) {
+					continue;
+				}
+			}
 
 			struct lcore_values *lvars = &core_vars[core_id];
 
@@ -3352,7 +3336,6 @@ int main(int argc, char **argv) {
 					lvars->tx_bypass_port_id = port_id;
 					lvars->tx_bypass_queue_id = queue_id;
 					port_vars[port_id].tx_slave_core_ids[queue_id] = core_id;
-					struct rte_mempool *mbp = lvars->mbp;
 
 					socket_id = (uint8_t)rte_lcore_to_socket_id(core_id);
 
@@ -3360,7 +3343,7 @@ int main(int argc, char **argv) {
 					txconf = &dev_info.default_txconf;
 
 					printf("Initializing tx bypass queue on lcore %u ... ", core_id);
-					printf("txq=%d,%d,%d,%p\n", lvars->rx_port_id, lvars->rx_queue_id, socket_id, mbp);
+					printf("txq=%d,%d,%d\n", lvars->rx_port_id, lvars->rx_queue_id, socket_id);
 					fflush(stdout);
 
 					// set-up queue
@@ -3371,31 +3354,13 @@ int main(int argc, char **argv) {
 					}
 
 					queue_id++;
-				} else {
-					lvars->tx_bypass_port_id = port_id;
-					lvars->tx_bypass_queue_id = queue_id_2;
-					port_vars[port_id].tx_slave_core_ids[queue_id + queue_id_2] = core_id;
-					struct rte_mempool *mbp = lvars->mbp;
-
-					socket_id = (uint8_t)rte_lcore_to_socket_id(core_id);
-
-					rte_eth_dev_info_get(port_id, &dev_info);
-					txconf = &dev_info.default_txconf;
-
-					printf("Initializing tx bypass queue on lcore %u ... ", core_id);
-					printf("txq=%d,%d,%d,%p\n", lvars->rx_port_id, lvars->rx_queue_id, socket_id, mbp);
-					fflush(stdout);
-
-					queue_id_2++;
 				}
 			}
 
-			// if (queue_id >= nb_tx_bypass_queues_per_port) {
-			// 	break;
-			// }
+			if (queue_id >= nb_tx_bypass_queues_per_port) {
+				break;
+			}
 		}
-
-		break;
 
 		// tx firewall ports
 
@@ -3585,8 +3550,6 @@ int main(int argc, char **argv) {
 		rte_eth_dev_close(port_id);
 		printf(" Done\n");
 	}
-#if ENABLE_MEASUREMENTS
-#endif
 
 	printf("Shutdown complete\n");
 

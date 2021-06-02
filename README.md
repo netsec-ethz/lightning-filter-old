@@ -69,7 +69,7 @@ sudo insmod ~/dpdk-stable-19.11.6/build/kmod/igb_uio.ko
 sudo ifconfig eth1 down
 sudo ~/dpdk-stable-19.11.6/usertools/dpdk-devbind.py --bind=igb_uio 0000:00:06.0
 
-sudo src/build/app/scionfwd -c 0x00003ffff00003ffff -- -r 0x1 -x 0x1 -y 0x1 -l -i -K 1 -S 5 -E 750000 -R 10000 -D 2500000
+sudo src/build/app/scionfwd -c 0x00003ffff00003ffff -- -r 0x1 -x 0x1 -y 0x0 -l -i -K 1 -S 5 -E 750000 -R 10000 -D 2500000
 ```
 
 ## References
