@@ -650,7 +650,7 @@ static void scionfwd_simple_forward(
 
 	ether_hdr0 = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
-	if (likely(ether_hdr0->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4))) {
+	if (unlikely(ether_hdr0->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4))) {
 		// #if LOG_PACKETS
 		printf("[%d] Unsupported packet type: must be IPv4.\n", lcore_id);
 		// #endif
