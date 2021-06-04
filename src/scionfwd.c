@@ -153,13 +153,13 @@ static uint64_t local_ia = 0x0000000000000000;
 struct backend {
 	rte_be32_t private_addr;
 	rte_be32_t public_addr;
-	rte_be64_t ia;
 };
 
 static struct backend backends[] = {
-	{ .private_addr = 0x00000000 /* big endian */,
+	{
+		.private_addr = 0x00000000 /* big endian */,
 		.public_addr = 0x00000000 /* big endian */,
-		.ia = 0x0000000000000000 },
+	},
 };
 
 struct peer {
@@ -167,7 +167,9 @@ struct peer {
 };
 
 static struct peer peers[] = {
-	{ .public_addr = 0x00000000 /* big endian */ },
+	{
+		.public_addr = 0x00000000 /* big endian */,
+	},
 };
 
 /**
@@ -522,13 +524,6 @@ static int is_backend(rte_be32_t private_addr) {
 
 static int is_peer(rte_be32_t public_addr) {
 	return find_peer(public_addr, NULL);
-}
-
-static rte_be64_t backend_ia(rte_be32_t private_addr) {
-	struct backend b;
-	int r = find_backend(private_addr, &b);
-	RTE_ASSERT(r != 0);
-	return b.ia;
 }
 
 static rte_be32_t backend_public_addr(rte_be32_t private_addr) {
@@ -1027,7 +1022,7 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 
 		rte_be32_t ipv4_hdr_src_addr0 = ipv4_hdr0->src_addr;
 		rte_be32_t ipv4_hdr_dst_addr0 = ipv4_hdr0->dst_addr;
-		rte_be64_t src_ia = backend_ia(ipv4_hdr_src_addr0);
+		rte_be64_t src_ia = local_ia;
 
 		ipv4_hdr0->hdr_checksum = 0;
 		ipv4_hdr0->src_addr = 0;
