@@ -96,6 +96,7 @@
 #define ENFORCE_LF_RATE_LIMIT_FILTER 1
 #define LOG_DELEGATION_SECRETS 0
 #define LOG_PACKETS 0
+#define CHECK_PACKET_STRUCTURE 1
 
 // logging
 #define RTE_LOGTYPE_scionfwd RTE_LOGTYPE_USER1
@@ -613,6 +614,534 @@ static void compute_lf_chksum(const unsigned lcore_id, unsigned char drkey[16], 
 #endif
 }
 
+static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hdr0,
+	struct rte_ipv4_hdr *ipv4_hdr0, const unsigned lcore_id, struct lcore_values *lvars,
+	int16_t state) {
+	uint16_t ipv4_total_length0 = rte_be_to_cpu_16(ipv4_hdr0->total_length);
+
+	int lf_pkt = 0;
+
+	if (is_peer(ipv4_hdr0->src_addr) && (ipv4_hdr0->next_proto_id == IP_PROTO_ID_UDP)) {
+		uint16_t ipv4_hdr_length0 =
+			(ipv4_hdr0->version_ihl & RTE_IPV4_HDR_IHL_MASK) * RTE_IPV4_IHL_MULTIPLIER;
+
+#if CHECK_PACKET_STRUCTURE
+		if (unlikely(ipv4_hdr_length0 < sizeof *ipv4_hdr0)) {
+			// #if LOG_PACKETS
+			printf("[%d] Invalid IP packet: header length too small.\n", lcore_id);
+			// #endif
+			return -1;
+		}
+#endif
+#if CHECK_PACKET_STRUCTURE
+		if (unlikely(ipv4_hdr_length0 > m->data_len - sizeof *ether_hdr0)) {
+			// #if LOG_PACKETS
+			printf("[%d] Not yet implemented: IP header exceeds first buffer segment.\n", lcore_id);
+			// #endif
+			return -1;
+		}
+#endif
+
+		struct rte_udp_hdr *udp_hdr;
+#if CHECK_PACKET_STRUCTURE
+		if (unlikely(sizeof *udp_hdr > m->data_len - sizeof *ether_hdr0 - ipv4_hdr_length0)) {
+			// #if LOG_PACKETS
+			printf("[%d] Not yet implemented: UDP header exceeds first buffer segment.\n", lcore_id);
+			// #endif
+			return -1;
+		}
+#endif
+		udp_hdr = (struct rte_udp_hdr *)((char *)ipv4_hdr0 + ipv4_hdr_length0);
+
+		uint16_t dst_port = rte_be_to_cpu_16(udp_hdr->dst_port);
+		if ((LF_DEFAULT_PORT <= dst_port) && (dst_port < LF_DEFAULT_PORT + 128)) {
+			lf_pkt = 1;
+
+#if CHECK_PACKET_STRUCTURE
+			if (unlikely(ipv4_total_length0 != m->data_len - sizeof *ether_hdr0)) {
+				// #if LOG_PACKETS
+				printf(
+					"[%d] Not yet implemented: IP packet length does not match with first buffer segment "
+					"length.\n",
+					lcore_id);
+				// #endif
+				return -1;
+			}
+#endif
+
+			uint16_t ipv4_data_length0 = ipv4_total_length0 - ipv4_hdr_length0;
+
+			rte_be32_t ipv4_hdr_src_addr0 = ipv4_hdr0->src_addr;
+			rte_be32_t ipv4_hdr_dst_addr0 = ipv4_hdr0->dst_addr;
+
+			uint16_t udp_dgram_length = rte_be_to_cpu_16(udp_hdr->dgram_len);
+#if CHECK_PACKET_STRUCTURE
+			if (unlikely(udp_dgram_length != ipv4_data_length0)) {
+				// #if LOG_PACKETS
+				printf("[%d] Invalid IP packet: total length inconsistent with UDP datagram length.\n",
+					lcore_id);
+				// #endif
+				return -1;
+			}
+#else
+			(void)ipv4_data_length0;
+			(void)udp_dgram_length;
+#endif
+#if CHECK_PACKET_STRUCTURE
+			if (unlikely(udp_dgram_length < sizeof *udp_hdr)) {
+				// #if LOG_PACKETS
+				printf("[%d] Invalid UDP packet: datagram length smaller than header length.\n", lcore_id);
+				// #endif
+				return -1;
+			}
+#endif
+
+			struct lf_hdr *lf_hdr;
+#if CHECK_PACKET_STRUCTURE
+			if (unlikely(sizeof *lf_hdr > udp_dgram_length - sizeof *udp_hdr)) {
+				// #if LOG_PACKETS
+				printf("[%d] Invalid LF packet: LF header exceeds datagram length.\n", lcore_id);
+				// #endif
+				return -1;
+			}
+#endif
+			lf_hdr = (struct lf_hdr *)(udp_hdr + 1);
+
+			uint16_t encaps_pkt_len = rte_be_to_cpu_16(lf_hdr->encaps_pkt_len);
+#if CHECK_PACKET_STRUCTURE
+			if (unlikely(encaps_pkt_len > udp_dgram_length - sizeof *udp_hdr - sizeof *lf_hdr)) {
+				// #if LOG_PACKETS
+				printf("[%d] Invalid LF packet: encapsulated packet length exceeds datagram length.\n",
+					lcore_id);
+				// #endif
+				return -1;
+			}
+#endif
+
+			uint16_t encaps_trl_len = (16 - (sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len) % 16) % 16;
+
+			if (encaps_trl_len != 0) {
+				char *p = rte_pktmbuf_append(m, encaps_trl_len);
+				RTE_ASSERT(p == (char *)(lf_hdr + 1) + encaps_pkt_len);
+				(void)memset(p, 0, encaps_trl_len);
+			}
+			unsigned char *chksum = computed_cmac[lcore_id];
+			struct timeval tv_now;
+			int r = gettimeofday(&tv_now, NULL);
+			if (unlikely(r != 0)) {
+				RTE_ASSERT(r == -1);
+				// #if LOG_PACKETS
+				printf("[%d] Syscall gettimeofday failed.\n", lcore_id);
+				// #endif
+				return -1;
+			}
+			RTE_ASSERT((INT64_MIN <= tv_now.tv_sec) && (tv_now.tv_sec <= INT64_MAX));
+			int64_t t_now = tv_now.tv_sec;
+			struct key_dictionary *d = key_dictionaries[lcore_id];
+			key_dictionary_find(d, lf_hdr->src_ia);
+			struct key_store_node *n = d->value;
+			if (unlikely(n == NULL)) {
+				// #if LOG_PACKETS
+				printf("[%d] Key store lookup failed.\n", lcore_id);
+				// #endif
+				return -1;
+			}
+			struct delegation_secret *ds = get_delegation_secret(n, t_now);
+			if (unlikely(ds == NULL)) {
+				// #if LOG_PACKETS
+				printf("[%d] Delegation secret lookup failed.\n", lcore_id);
+				// #endif
+				return -1;
+			}
+#if LOG_PACKETS
+			printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, lf_hdr->src_ia, t_now);
+			dump_hex(lcore_id, ds->key, 16);
+			printf("[%d] }\n", lcore_id);
+#endif
+			compute_lf_chksum(lcore_id,
+				/* drkey: */ ds->key,
+				/* src_addr: */ ipv4_hdr_src_addr0,
+				/* dst_addr: */ backend_public_addr(ipv4_hdr_dst_addr0),
+				/* data: */ &lf_hdr->encaps_pkt_len,
+				/* data_len: */ sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len + encaps_trl_len,
+				/* chksum: */ chksum,
+				/* rkey_buf: */ roundkey[lcore_id],
+				/* addr_buf: */ key_hosts_addrs[lcore_id]);
+			bool is_chksum_valid = crypto_cmp_16(lf_hdr->encaps_pkt_chksum, chksum) == 0;
+			if (unlikely(
+						!is_chksum_valid && (ds->validity_not_after - t_now < max_key_validity_extension))) {
+				ds = &n->key_store->delegation_secrets[NEXT_KEY_INDEX(n->key_index)];
+				if (ds->validity_not_before < ds->validity_not_after) {
+#if LOG_PACKETS
+					printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, lf_hdr->src_ia, t_now);
+					dump_hex(lcore_id, ds->key, 16);
+					printf("[%d] }\n", lcore_id);
+#endif
+					compute_lf_chksum(lcore_id,
+						/* drkey: */ ds->key,
+						/* src_addr: */ ipv4_hdr_src_addr0,
+						/* dst_addr: */ backend_public_addr(ipv4_hdr_dst_addr0),
+						/* data: */ &lf_hdr->encaps_pkt_len,
+						/* data_len: */ sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len + encaps_trl_len,
+						/* chksum: */ chksum,
+						/* rkey_buf: */ roundkey[lcore_id],
+						/* addr_buf: */ key_hosts_addrs[lcore_id]);
+					is_chksum_valid = crypto_cmp_16(lf_hdr->encaps_pkt_chksum, chksum) == 0;
+				}
+			}
+			if (unlikely(
+						!is_chksum_valid && (t_now - ds->validity_not_before < max_key_validity_extension))) {
+				ds = &n->key_store->delegation_secrets[PREV_KEY_INDEX(n->key_index)];
+				if (ds->validity_not_before < ds->validity_not_after) {
+#if LOG_PACKETS
+					printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, lf_hdr->src_ia, t_now);
+					dump_hex(lcore_id, ds->key, 16);
+					printf("[%d] }\n", lcore_id);
+#endif
+					compute_lf_chksum(lcore_id,
+						/* drkey: */ ds->key,
+						/* src_addr: */ ipv4_hdr_src_addr0,
+						/* dst_addr: */ backend_public_addr(ipv4_hdr_dst_addr0),
+						/* data: */ &lf_hdr->encaps_pkt_len,
+						/* data_len: */ sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len + encaps_trl_len,
+						/* chksum: */ chksum,
+						/* rkey_buf: */ roundkey[lcore_id],
+						/* addr_buf: */ key_hosts_addrs[lcore_id]);
+					is_chksum_valid = crypto_cmp_16(lf_hdr->encaps_pkt_chksum, chksum) == 0;
+				}
+			}
+			if (unlikely(!is_chksum_valid)) {
+				// #if LOG_PACKETS
+				printf("[%d] Invalid LF packet: checksum verification failed.\n", lcore_id);
+				// #endif
+				return -1;
+			}
+			if (encaps_trl_len != 0) {
+				int r = rte_pktmbuf_trim(m, encaps_trl_len);
+				RTE_ASSERT(r == 0);
+			}
+
+			struct lcore_values *lcore_values = &core_vars[lcore_id];
+
+			// Periodically rotate and reset the bloom filters to avoid overcrowding
+			lcore_values->cur_ts = tv_now;
+			if ((lcore_values->cur_ts.tv_sec - lcore_values->last_ts.tv_sec) * 1000000
+						+ lcore_values->cur_ts.tv_usec - lcore_values->last_ts.tv_usec
+					> delta_us)
+			{
+				lcore_values->active_filter_id = (lcore_values->active_filter_id + 1) % MAX_BLOOM_FILTERS;
+				bloom_free(&lcore_values->bloom_filters[lcore_values->active_filter_id]);
+				bloom_init(&lcore_values->bloom_filters[lcore_values->active_filter_id], NUM_BLOOM_ENTRIES,
+					1.0 / BLOOM_ERROR_RATE);
+				lcore_values->last_ts = lcore_values->cur_ts;
+			}
+			int dup = sc_bloom_add(
+				lcore_values->bloom_filters, MAX_BLOOM_FILTERS, lcore_values->active_filter_id, chksum, 16);
+			if (dup != 0) {
+				lcore_values->stats.bloom_filter_hit_counter++;
+#if ENFORCE_DUPLICATE_FILTER
+				// #if LOG_PACKETS
+				printf("[%d] Duplicate LF packet.\n", lcore_id);
+				// #endif
+				return -1;
+#endif
+			} else {
+				lcore_values->stats.bloom_filter_miss_counter++;
+			}
+
+			uint16_t encaps_hdr_len = ipv4_hdr_length0 + sizeof *udp_hdr + sizeof *lf_hdr;
+
+			RTE_ASSERT(sizeof *ether_hdr0 <= encaps_hdr_len);
+			struct rte_ether_hdr *ether_hdr1 =
+				rte_memcpy((char *)ether_hdr0 + encaps_hdr_len, ether_hdr0, sizeof *ether_hdr0);
+
+			char *p = rte_pktmbuf_adj(m, encaps_hdr_len);
+			RTE_ASSERT(p != NULL);
+
+			RTE_ASSERT(p == (char *)ether_hdr1);
+
+			RTE_ASSERT(sizeof *ether_hdr1 <= m->data_len);
+			struct rte_ipv4_hdr *ipv4_hdr1 = (struct rte_ipv4_hdr *)(ether_hdr1 + 1);
+
+			RTE_ASSERT(sizeof *ipv4_hdr1 <= m->data_len - sizeof *ether_hdr1);
+
+			uint16_t ipv4_total_length1 = rte_be_to_cpu_16(ipv4_hdr1->total_length);
+			RTE_ASSERT(ipv4_total_length1 == m->data_len - sizeof *ether_hdr1);
+
+#if ENFORCE_LF_RATE_LIMIT_FILTER
+			dictionary_flow *lcore_dict = dos_stats[lcore_id].dos_dictionary[state];
+			r = dic_find_flow(lcore_dict, lf_hdr->src_ia);
+			RTE_ASSERT(r == 1);
+
+			// Rate limit LF traffic
+			if (lcore_dict->value->secX_counter <= 0) {
+				if (lcore_dict->value->sc_counter <= 0) {
+					int64_t reserve = rte_atomic64_read(lcore_dict->value->reserve);
+					if (reserve <= 0) {
+						lcore_values->stats.as_rate_limited++;
+	#if LOG_PACKETS
+						printf("[%d] LF rate limit for %0lx exceeded.\n", lcore_id, lf_hdr->src_ia);
+	#endif
+						return -1;
+					} else {
+						rte_atomic64_sub(lcore_dict->value->reserve, ipv4_total_length1);
+					}
+				} else {
+					lcore_dict->value->sc_counter -= ipv4_total_length1;
+				}
+			} else {
+				lcore_dict->value->secX_counter -= ipv4_total_length1;
+			}
+			// Check then for overall rate
+			if (dos_stats[lcore_id].secX_dos_packet_count[state] <= 0) {
+				if (dos_stats[lcore_id].sc_dos_packet_count[state] <= 0) {
+					int64_t reserve = rte_atomic64_read(dos_stats[lcore_id].reserve[state]);
+					if (reserve <= 0) {
+						lcore_values->stats.rate_limited++;
+	#if LOG_PACKETS
+						printf("[%d] LF overall rate limit for %0lx exceeded.\n", lcore_id, lf_hdr->src_ia);
+	#endif
+						return -1;
+					} else {
+						rte_atomic64_sub(dos_stats[lcore_id].reserve[state], ipv4_total_length1);
+					}
+				} else {
+					dos_stats[lcore_id].sc_dos_packet_count[state] -= ipv4_total_length1;
+				}
+			} else {
+				dos_stats[lcore_id].secX_dos_packet_count[state] -= ipv4_total_length1;
+			}
+#endif
+
+			ipv4_hdr1->hdr_checksum = 0;
+			ipv4_hdr1->src_addr = ipv4_hdr_src_addr0;
+			ipv4_hdr1->dst_addr = ipv4_hdr_dst_addr0;
+
+			m->l2_len = sizeof *ether_hdr1;
+			m->l3_len = sizeof *ipv4_hdr1;
+			m->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM;
+
+			if (ipv4_hdr1->next_proto_id == IP_PROTO_ID_UDP) {
+				struct rte_udp_hdr *udp_hdr;
+				RTE_ASSERT(sizeof *udp_hdr <= m->data_len - sizeof *ether_hdr1 - sizeof *ipv4_hdr1);
+				udp_hdr = (struct rte_udp_hdr *)(ipv4_hdr1 + 1);
+				udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, /* ol_flags: */ 0);
+				m->ol_flags |= PKT_TX_UDP_CKSUM;
+			} else if (ipv4_hdr1->next_proto_id == IP_PROTO_ID_TCP) {
+				struct rte_tcp_hdr *tcp_hdr;
+				RTE_ASSERT(sizeof *tcp_hdr <= m->data_len - sizeof *ether_hdr1 - sizeof *ipv4_hdr1);
+				tcp_hdr = (struct rte_tcp_hdr *)(ipv4_hdr1 + 1);
+				tcp_hdr->cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, /* ol_flags: */ 0);
+				m->ol_flags |= PKT_TX_TCP_CKSUM;
+			}
+		}
+	}
+
+	if (lf_pkt == 0) {
+		struct lcore_values *lcore_values = &core_vars[lcore_id];
+		dictionary_flow *lcore_dict = dos_stats[lcore_id].dos_dictionary[state];
+
+		int r = dic_find_flow(lcore_dict, 0);
+		RTE_ASSERT(r == 1);
+
+		// Rate limit non-LF traffic
+		if (lcore_dict->value->sc_counter <= 0) {
+			lcore_values->stats.as_rate_limited++;
+#if LOG_PACKETS
+			printf("[%d] Non-LF rate limit exceeded.\n", lcore_id);
+#endif
+			return -1;
+		} else {
+			lcore_dict->value->sc_counter -= ipv4_total_length0;
+		}
+		// Check then for overall rate
+		if (dos_stats[lcore_id].sc_dos_packet_count[state] <= 0) {
+			lcore_values->stats.rate_limited++;
+#if LOG_PACKETS
+			printf("[%d] Non-LF overall rate limit exceeded.\n", lcore_id);
+#endif
+			return -1;
+		} else {
+			dos_stats[lcore_id].sc_dos_packet_count[state] -= ipv4_total_length0;
+		}
+	}
+
+	swap_eth_addrs(m);
+
+#if LOG_PACKETS
+	printf("[%d] Forwarding incoming packet:\n", lcore_id);
+	dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
+#endif
+	uint16_t n = rte_eth_tx_buffer(
+		lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
+	(void)n;
+#if LOG_PACKETS
+	if (n > 0) {
+		printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
+	}
+#endif
+
+	return 0;
+}
+
+static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hdr0,
+	struct rte_ipv4_hdr *ipv4_hdr0, const unsigned lcore_id, struct lcore_values *lvars) {
+	if (is_peer(ipv4_hdr0->dst_addr)) {
+		uint16_t ipv4_total_length0 = rte_be_to_cpu_16(ipv4_hdr0->total_length);
+
+		if (unlikely(ipv4_total_length0 != m->data_len - sizeof *ether_hdr0)) {
+			// #if LOG_PACKETS
+			printf(
+				"[%d] Not yet implemented: IP packet length does not match with first buffer segment "
+				"length.\n",
+				lcore_id);
+			// #endif
+			return -1;
+		}
+
+		struct rte_ipv4_hdr *ipv4_hdr1;
+		struct rte_udp_hdr *udp_hdr;
+		struct lf_hdr *lf_hdr;
+		RTE_ASSERT(sizeof *ipv4_hdr1 <= UINT16_MAX);
+		RTE_ASSERT(sizeof *udp_hdr <= UINT16_MAX - sizeof *ipv4_hdr1);
+		RTE_ASSERT(sizeof *lf_hdr <= UINT16_MAX - sizeof *ipv4_hdr1 - sizeof *udp_hdr);
+		uint16_t encaps_hdr_len = sizeof *ipv4_hdr1 + sizeof *udp_hdr + sizeof *lf_hdr;
+
+		RTE_ASSERT(sizeof lf_hdr->encaps_pkt_len <= UINT16_MAX);
+		if (unlikely((uint16_t)(sizeof lf_hdr->encaps_pkt_len) > UINT16_MAX - ipv4_total_length0)) {
+			// #if LOG_PACKETS
+			printf("[%d] Not yet implemented: LF packet too big to encapsualte.\n", lcore_id);
+			// #endif
+			return -1;
+		}
+
+		uint16_t encaps_trl_len = (16 - (sizeof lf_hdr->encaps_pkt_len + ipv4_total_length0) % 16) % 16;
+		RTE_ASSERT(encaps_trl_len < UINT16_MAX - encaps_hdr_len);
+
+		if (unlikely(encaps_hdr_len + encaps_trl_len > UINT16_MAX - ipv4_total_length0)) {
+			// #if LOG_PACKETS
+			printf("[%d] Not yet implemented: LF packet too big to encapsualte.\n", lcore_id);
+			// #endif
+			return -1;
+		}
+
+		rte_be32_t ipv4_hdr_src_addr0 = ipv4_hdr0->src_addr;
+		rte_be32_t ipv4_hdr_dst_addr0 = ipv4_hdr0->dst_addr;
+		rte_be64_t src_ia = backend_ia(ipv4_hdr_src_addr0);
+
+		ipv4_hdr0->hdr_checksum = 0;
+		ipv4_hdr0->src_addr = 0;
+		ipv4_hdr0->dst_addr = 0;
+
+		char *p = rte_pktmbuf_prepend(m, encaps_hdr_len);
+		RTE_ASSERT(p != NULL);
+
+		RTE_ASSERT(sizeof *ether_hdr0 <= encaps_hdr_len);
+		struct rte_ether_hdr *ether_hdr1 =
+			rte_memcpy((char *)ether_hdr0 - encaps_hdr_len, ether_hdr0, sizeof *ether_hdr0);
+
+		RTE_ASSERT(p == (char *)ether_hdr1);
+
+		ipv4_hdr1 = (struct rte_ipv4_hdr *)(ether_hdr1 + 1);
+		ipv4_hdr1->version_ihl = (IPV4_VERSION << 4) | (sizeof *ipv4_hdr1) / RTE_IPV4_IHL_MULTIPLIER;
+		ipv4_hdr1->type_of_service = 0;
+		ipv4_hdr1->total_length = rte_cpu_to_be_16(encaps_hdr_len + ipv4_total_length0);
+		ipv4_hdr1->packet_id = 0;
+		ipv4_hdr1->fragment_offset = rte_cpu_to_be_16(RTE_IPV4_HDR_DF_FLAG);
+		ipv4_hdr1->time_to_live = IP_TTL_DEFAULT;
+		ipv4_hdr1->next_proto_id = IP_PROTO_ID_UDP;
+		ipv4_hdr1->hdr_checksum = 0;
+		ipv4_hdr1->src_addr = ipv4_hdr_src_addr0;
+		ipv4_hdr1->dst_addr = ipv4_hdr_dst_addr0;
+
+		udp_hdr = (struct rte_udp_hdr *)(ipv4_hdr1 + 1);
+		udp_hdr->src_port = rte_cpu_to_be_16(LF_DEFAULT_PORT + lcore_id);
+		udp_hdr->dst_port = rte_cpu_to_be_16(LF_DEFAULT_PORT + lcore_id);
+		udp_hdr->dgram_len = rte_cpu_to_be_16(sizeof *udp_hdr + sizeof *lf_hdr + ipv4_total_length0);
+		udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, /* ol_flags: */ 0);
+
+		lf_hdr = (struct lf_hdr *)(udp_hdr + 1);
+		lf_hdr->lf_pkt_type = 0;
+		lf_hdr->reserved[0] = 0;
+		lf_hdr->reserved[1] = 0;
+		lf_hdr->reserved[2] = 0;
+		lf_hdr->src_ia = src_ia;
+		lf_hdr->encaps_pkt_len = rte_cpu_to_be_16(ipv4_total_length0);
+
+		if (encaps_trl_len != 0) {
+			p = rte_pktmbuf_append(m, encaps_trl_len);
+			RTE_ASSERT(p == (char *)(lf_hdr + 1) + ipv4_total_length0);
+			(void)memset(p, 0, encaps_trl_len);
+		}
+		struct timeval tv;
+		int r = gettimeofday(&tv, NULL);
+		if (unlikely(r != 0)) {
+			RTE_ASSERT(r == -1);
+			// #if LOG_PACKETS
+			printf("[%d] Syscall gettimeofday failed.\n", lcore_id);
+			// #endif
+			return -1;
+		}
+		RTE_ASSERT((INT64_MIN <= tv.tv_sec) && (tv.tv_sec <= INT64_MAX));
+		int64_t t_now = tv.tv_sec;
+		struct key_dictionary *d = key_dictionaries[lcore_id];
+		key_dictionary_find(d, src_ia);
+		struct key_store_node *n = d->value;
+		if (n == NULL) {
+			// #if LOG_PACKETS
+			printf("[%d] Key store lookup failed.\n", lcore_id);
+			// #endif
+			return -1;
+		}
+		struct delegation_secret *ds = get_delegation_secret(n, t_now);
+		if (ds == NULL) {
+			// #if LOG_PACKETS
+			printf("[%d] Delegation secret lookup failed.\n", lcore_id);
+			// #endif
+			return -1;
+		}
+#if LOG_PACKETS
+		printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, src_ia, t_now);
+		dump_hex(lcore_id, ds->key, 16);
+		printf("[%d] }\n", lcore_id);
+#endif
+		compute_lf_chksum(lcore_id,
+			/* drkey: */ ds->key,
+			/* src_addr: */ backend_public_addr(ipv4_hdr_src_addr0),
+			/* dst_addr: */ ipv4_hdr_dst_addr0,
+			/* data: */ &lf_hdr->encaps_pkt_len,
+			/* data_len: */ sizeof lf_hdr->encaps_pkt_len + ipv4_total_length0 + encaps_trl_len,
+			/* chksum: */ lf_hdr->encaps_pkt_chksum,
+			/* rkey_buf: */ roundkey[lcore_id],
+			/* addr_buf: */ key_hosts_addrs[lcore_id]);
+		if (encaps_trl_len != 0) {
+			int r = rte_pktmbuf_trim(m, encaps_trl_len);
+			RTE_ASSERT(r == 0);
+		}
+
+		m->l2_len = sizeof *ether_hdr1;
+		m->l3_len = sizeof *ipv4_hdr1;
+		m->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
+	}
+
+	swap_eth_addrs(m);
+
+#if LOG_PACKETS
+	printf("[%d] Forwarding outgoing packet:\n", lcore_id);
+	dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
+#endif
+	uint16_t n = rte_eth_tx_buffer(
+		lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
+	(void)n;
+#if LOG_PACKETS
+	if (n > 0) {
+		printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
+	}
+#endif
+
+	return 0;
+}
+
 static void scionfwd_simple_forward(
 	struct rte_mbuf *m, const unsigned lcore_id, struct lcore_values *lvars, int16_t state) {
 #if SIMPLE_FORWARD
@@ -633,21 +1162,24 @@ static void scionfwd_simple_forward(
 	return;
 #endif
 
+#if CHECK_PACKET_STRUCTURE
 	if (unlikely(m->data_len != m->pkt_len)) {
 		// #if LOG_PACKETS
 		printf("[%d] Not yet implemented: buffer with multiple segments received.\n", lcore_id);
 		// #endif
 		goto drop_pkt;
 	}
+#endif
 
 	struct rte_ether_hdr *ether_hdr0;
+#if CHECK_PACKET_STRUCTURE
 	if (unlikely(sizeof *ether_hdr0 > m->data_len)) {
 		// #if LOG_PACKETS
 		printf("[%d] Unsupported packet: Ethernet header exceeds first buffer segment.\n", lcore_id);
 		// #endif
 		goto drop_pkt;
 	}
-
+#endif
 	ether_hdr0 = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
 	if (unlikely(ether_hdr0->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4))) {
@@ -658,519 +1190,26 @@ static void scionfwd_simple_forward(
 	}
 
 	struct rte_ipv4_hdr *ipv4_hdr0;
+#if CHECK_PACKET_STRUCTURE
 	if (unlikely(sizeof *ipv4_hdr0 > m->data_len - sizeof *ether_hdr0)) {
 		// #if LOG_PACKETS
 		printf("[%d] Unsupported packet: IP header exceeds first buffer segment.\n", lcore_id);
 		// #endif
 		goto drop_pkt;
 	}
+#endif
 	ipv4_hdr0 = (struct rte_ipv4_hdr *)(ether_hdr0 + 1);
 
-	uint16_t ipv4_total_length0 = rte_be_to_cpu_16(ipv4_hdr0->total_length);
-
+	int r;
 	if (is_backend(ipv4_hdr0->dst_addr)) {
-		int lf_pkt = 0;
-
-		if (is_peer(ipv4_hdr0->src_addr) && (ipv4_hdr0->next_proto_id == IP_PROTO_ID_UDP)) {
-			uint16_t ipv4_hdr_length0 =
-				(ipv4_hdr0->version_ihl & RTE_IPV4_HDR_IHL_MASK) * RTE_IPV4_IHL_MULTIPLIER;
-			if (unlikely(ipv4_hdr_length0 < sizeof *ipv4_hdr0)) {
-				// #if LOG_PACKETS
-				printf("[%d] Invalid IP packet: header length too small.\n", lcore_id);
-				// #endif
-				goto drop_pkt;
-			}
-			if (unlikely(ipv4_hdr_length0 > m->data_len - sizeof *ether_hdr0)) {
-				// #if LOG_PACKETS
-				printf("[%d] Not yet implemented: IP header exceeds first buffer segment.\n", lcore_id);
-				// #endif
-				goto drop_pkt;
-			}
-
-			struct rte_udp_hdr *udp_hdr;
-			if (unlikely(sizeof *udp_hdr > m->data_len - sizeof *ether_hdr0 - ipv4_hdr_length0)) {
-				// #if LOG_PACKETS
-				printf("[%d] Not yet implemented: UDP header exceeds first buffer segment.\n", lcore_id);
-				// #endif
-				goto drop_pkt;
-			}
-			udp_hdr = (struct rte_udp_hdr *)((char *)ipv4_hdr0 + ipv4_hdr_length0);
-
-			uint16_t dst_port = rte_be_to_cpu_16(udp_hdr->dst_port);
-			if ((LF_DEFAULT_PORT <= dst_port) && (dst_port < LF_DEFAULT_PORT + 128)) {
-				lf_pkt = 1;
-
-				if (unlikely(ipv4_total_length0 != m->data_len - sizeof *ether_hdr0)) {
-					// #if LOG_PACKETS
-					printf(
-						"[%d] Not yet implemented: IP packet length does not match with first buffer segment "
-						"length.\n",
-						lcore_id);
-					// #endif
-					goto drop_pkt;
-				}
-
-				uint16_t ipv4_data_length0 = ipv4_total_length0 - ipv4_hdr_length0;
-
-				rte_be32_t ipv4_hdr_src_addr0 = ipv4_hdr0->src_addr;
-				rte_be32_t ipv4_hdr_dst_addr0 = ipv4_hdr0->dst_addr;
-
-				uint16_t udp_dgram_length = rte_be_to_cpu_16(udp_hdr->dgram_len);
-				if (unlikely(udp_dgram_length != ipv4_data_length0)) {
-					// #if LOG_PACKETS
-					printf("[%d] Invalid IP packet: total length inconsistent with UDP datagram length.\n",
-						lcore_id);
-					// #endif
-					goto drop_pkt;
-				}
-				if (unlikely(udp_dgram_length < sizeof *udp_hdr)) {
-					// #if LOG_PACKETS
-					printf(
-						"[%d] Invalid UDP packet: datagram length smaller than header length.\n", lcore_id);
-					// #endif
-					goto drop_pkt;
-				}
-
-				struct lf_hdr *lf_hdr;
-				if (unlikely(sizeof *lf_hdr > udp_dgram_length - sizeof *udp_hdr)) {
-					// #if LOG_PACKETS
-					printf("[%d] Invalid LF packet: LF header exceeds datagram length.\n", lcore_id);
-					// #endif
-					goto drop_pkt;
-				}
-				lf_hdr = (struct lf_hdr *)(udp_hdr + 1);
-
-				uint16_t encaps_pkt_len = rte_be_to_cpu_16(lf_hdr->encaps_pkt_len);
-				if (unlikely(encaps_pkt_len > udp_dgram_length - sizeof *udp_hdr - sizeof *lf_hdr)) {
-					// #if LOG_PACKETS
-					printf("[%d] Invalid LF packet: encapsulated packet length exceeds datagram length.\n",
-						lcore_id);
-					// #endif
-					goto drop_pkt;
-				}
-
-				uint16_t encaps_trl_len = (16 - (sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len) % 16) % 16;
-
-				if (encaps_trl_len != 0) {
-					char *p = rte_pktmbuf_append(m, encaps_trl_len);
-					RTE_ASSERT(p == (char *)(lf_hdr + 1) + encaps_pkt_len);
-					(void)memset(p, 0, encaps_trl_len);
-				}
-				unsigned char *chksum = computed_cmac[lcore_id];
-				struct timeval tv;
-				int r = gettimeofday(&tv, NULL);
-				if (unlikely(r != 0)) {
-					RTE_ASSERT(r == -1);
-					// #if LOG_PACKETS
-					printf("[%d] Syscall gettimeofday failed.\n", lcore_id);
-					// #endif
-					goto drop_pkt;
-				}
-				RTE_ASSERT((INT64_MIN <= tv.tv_sec) && (tv.tv_sec <= INT64_MAX));
-				int64_t t_now = tv.tv_sec;
-				struct key_dictionary *d = key_dictionaries[lcore_id];
-				key_dictionary_find(d, lf_hdr->src_ia);
-				struct key_store_node *n = d->value;
-				if (n == NULL) {
-					// #if LOG_PACKETS
-					printf("[%d] Key store lookup failed.\n", lcore_id);
-					// #endif
-					goto drop_pkt;
-				}
-				struct delegation_secret *ds = get_delegation_secret(n, t_now);
-				if (ds == NULL) {
-					// #if LOG_PACKETS
-					printf("[%d] Delegation secret lookup failed.\n", lcore_id);
-					// #endif
-					goto drop_pkt;
-				}
-#if LOG_PACKETS
-				printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, lf_hdr->src_ia, t_now);
-				dump_hex(lcore_id, ds->key, 16);
-				printf("[%d] }\n", lcore_id);
-#endif
-				compute_lf_chksum(lcore_id,
-					/* drkey: */ ds->key,
-					/* src_addr: */ ipv4_hdr_src_addr0,
-					/* dst_addr: */ backend_public_addr(ipv4_hdr_dst_addr0),
-					/* data: */ &lf_hdr->encaps_pkt_len,
-					/* data_len: */ sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len + encaps_trl_len,
-					/* chksum: */ chksum,
-					/* rkey_buf: */ roundkey[lcore_id],
-					/* addr_buf: */ key_hosts_addrs[lcore_id]);
-				bool is_chksum_valid = crypto_cmp_16(lf_hdr->encaps_pkt_chksum, chksum) == 0;
-				if (unlikely(
-							!is_chksum_valid && (ds->validity_not_after - t_now < max_key_validity_extension))) {
-					ds = &n->key_store->delegation_secrets[NEXT_KEY_INDEX(n->key_index)];
-					if (ds->validity_not_before < ds->validity_not_after) {
-#if LOG_PACKETS
-						printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, lf_hdr->src_ia, t_now);
-						dump_hex(lcore_id, ds->key, 16);
-						printf("[%d] }\n", lcore_id);
-#endif
-						compute_lf_chksum(lcore_id,
-							/* drkey: */ ds->key,
-							/* src_addr: */ ipv4_hdr_src_addr0,
-							/* dst_addr: */ backend_public_addr(ipv4_hdr_dst_addr0),
-							/* data: */ &lf_hdr->encaps_pkt_len,
-							/* data_len: */ sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len + encaps_trl_len,
-							/* chksum: */ chksum,
-							/* rkey_buf: */ roundkey[lcore_id],
-							/* addr_buf: */ key_hosts_addrs[lcore_id]);
-						is_chksum_valid = crypto_cmp_16(lf_hdr->encaps_pkt_chksum, chksum) == 0;
-					}
-				}
-				if (unlikely(
-							!is_chksum_valid && (t_now - ds->validity_not_before < max_key_validity_extension))) {
-					ds = &n->key_store->delegation_secrets[PREV_KEY_INDEX(n->key_index)];
-					if (ds->validity_not_before < ds->validity_not_after) {
-#if LOG_PACKETS
-						printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, lf_hdr->src_ia, t_now);
-						dump_hex(lcore_id, ds->key, 16);
-						printf("[%d] }\n", lcore_id);
-#endif
-						compute_lf_chksum(lcore_id,
-							/* drkey: */ ds->key,
-							/* src_addr: */ ipv4_hdr_src_addr0,
-							/* dst_addr: */ backend_public_addr(ipv4_hdr_dst_addr0),
-							/* data: */ &lf_hdr->encaps_pkt_len,
-							/* data_len: */ sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len + encaps_trl_len,
-							/* chksum: */ chksum,
-							/* rkey_buf: */ roundkey[lcore_id],
-							/* addr_buf: */ key_hosts_addrs[lcore_id]);
-						is_chksum_valid = crypto_cmp_16(lf_hdr->encaps_pkt_chksum, chksum) == 0;
-					}
-				}
-				if (unlikely(!is_chksum_valid)) {
-					// #if LOG_PACKETS
-					printf("[%d] Invalid LF packet: checksum verification failed.\n", lcore_id);
-					// #endif
-					goto drop_pkt;
-				}
-				if (encaps_trl_len != 0) {
-					int r = rte_pktmbuf_trim(m, encaps_trl_len);
-					RTE_ASSERT(r == 0);
-				}
-
-				struct lcore_values *lcore_values = &core_vars[lcore_id];
-
-				// Periodically rotate and reset the bloom filters to avoid overcrowding
-				r = gettimeofday(&lcore_values->cur_ts, NULL);
-				if (unlikely(r != 0)) {
-					RTE_ASSERT(r == -1);
-					// #if LOG_PACKETS
-					printf("[%d] Syscall gettimeofday failed.\n", lcore_id);
-					// #endif
-					goto drop_pkt;
-				}
-				if ((lcore_values->cur_ts.tv_sec - lcore_values->last_ts.tv_sec) * 1000000
-							+ lcore_values->cur_ts.tv_usec - lcore_values->last_ts.tv_usec
-						> delta_us)
-				{
-					lcore_values->active_filter_id = (lcore_values->active_filter_id + 1) % MAX_BLOOM_FILTERS;
-					bloom_free(&lcore_values->bloom_filters[lcore_values->active_filter_id]);
-					bloom_init(&lcore_values->bloom_filters[lcore_values->active_filter_id],
-						NUM_BLOOM_ENTRIES, 1.0 / BLOOM_ERROR_RATE);
-					lcore_values->last_ts = lcore_values->cur_ts;
-				}
-				int dup = sc_bloom_add(lcore_values->bloom_filters, MAX_BLOOM_FILTERS,
-					lcore_values->active_filter_id, chksum, 16);
-				if (dup != 0) {
-					lcore_values->stats.bloom_filter_hit_counter++;
-#if ENFORCE_DUPLICATE_FILTER
-					// #if LOG_PACKETS
-					printf("[%d] Duplicate LF packet.\n", lcore_id);
-					// #endif
-					goto drop_pkt;
-#endif
-				} else {
-					lcore_values->stats.bloom_filter_miss_counter++;
-				}
-
-				uint16_t encaps_hdr_len = ipv4_hdr_length0 + sizeof *udp_hdr + sizeof *lf_hdr;
-
-				RTE_ASSERT(sizeof *ether_hdr0 <= encaps_hdr_len);
-				struct rte_ether_hdr *ether_hdr1 =
-					rte_memcpy((char *)ether_hdr0 + encaps_hdr_len, ether_hdr0, sizeof *ether_hdr0);
-
-				char *p = rte_pktmbuf_adj(m, encaps_hdr_len);
-				RTE_ASSERT(p != NULL);
-
-				RTE_ASSERT(p == (char *)ether_hdr1);
-
-				RTE_ASSERT(sizeof *ether_hdr1 <= m->data_len);
-				struct rte_ipv4_hdr *ipv4_hdr1 = (struct rte_ipv4_hdr *)(ether_hdr1 + 1);
-
-				RTE_ASSERT(sizeof *ipv4_hdr1 <= m->data_len - sizeof *ether_hdr1);
-
-				uint16_t ipv4_total_length1 = rte_be_to_cpu_16(ipv4_hdr1->total_length);
-				RTE_ASSERT(ipv4_total_length1 == m->data_len - sizeof *ether_hdr1);
-
-#if ENFORCE_LF_RATE_LIMIT_FILTER
-				dictionary_flow *lcore_dict = dos_stats[lcore_id].dos_dictionary[state];
-				r = dic_find_flow(lcore_dict, lf_hdr->src_ia);
-				RTE_ASSERT(r == 1);
-
-				// Rate limit LF traffic
-				if (lcore_dict->value->secX_counter <= 0) {
-					if (lcore_dict->value->sc_counter <= 0) {
-						int64_t reserve = rte_atomic64_read(lcore_dict->value->reserve);
-						if (reserve <= 0) {
-							lcore_values->stats.as_rate_limited++;
-	#if LOG_PACKETS
-							printf("[%d] LF rate limit for %0lx exceeded.\n", lcore_id, lf_hdr->src_ia);
-	#endif
-							goto drop_pkt;
-						} else {
-							rte_atomic64_sub(lcore_dict->value->reserve, ipv4_total_length1);
-						}
-					} else {
-						lcore_dict->value->sc_counter -= ipv4_total_length1;
-					}
-				} else {
-					lcore_dict->value->secX_counter -= ipv4_total_length1;
-				}
-				// Check then for overall rate
-				if (dos_stats[lcore_id].secX_dos_packet_count[state] <= 0) {
-					if (dos_stats[lcore_id].sc_dos_packet_count[state] <= 0) {
-						int64_t reserve = rte_atomic64_read(dos_stats[lcore_id].reserve[state]);
-						if (reserve <= 0) {
-							lcore_values->stats.rate_limited++;
-	#if LOG_PACKETS
-							printf("[%d] LF overall rate limit for %0lx exceeded.\n", lcore_id, lf_hdr->src_ia);
-	#endif
-							goto drop_pkt;
-						} else {
-							rte_atomic64_sub(dos_stats[lcore_id].reserve[state], ipv4_total_length1);
-						}
-					} else {
-						dos_stats[lcore_id].sc_dos_packet_count[state] -= ipv4_total_length1;
-					}
-				} else {
-					dos_stats[lcore_id].secX_dos_packet_count[state] -= ipv4_total_length1;
-				}
-#endif
-
-				ipv4_hdr1->hdr_checksum = 0;
-				ipv4_hdr1->src_addr = ipv4_hdr_src_addr0;
-				ipv4_hdr1->dst_addr = ipv4_hdr_dst_addr0;
-
-				m->l2_len = sizeof *ether_hdr1;
-				m->l3_len = sizeof *ipv4_hdr1;
-				m->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM;
-
-				if (ipv4_hdr1->next_proto_id == IP_PROTO_ID_UDP) {
-					struct rte_udp_hdr *udp_hdr;
-					RTE_ASSERT(sizeof *udp_hdr <= m->data_len - sizeof *ether_hdr1 - sizeof *ipv4_hdr1);
-					udp_hdr = (struct rte_udp_hdr *)(ipv4_hdr1 + 1);
-					udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, /* ol_flags: */ 0);
-					m->ol_flags |= PKT_TX_UDP_CKSUM;
-				} else if (ipv4_hdr1->next_proto_id == IP_PROTO_ID_TCP) {
-					struct rte_tcp_hdr *tcp_hdr;
-					RTE_ASSERT(sizeof *tcp_hdr <= m->data_len - sizeof *ether_hdr1 - sizeof *ipv4_hdr1);
-					tcp_hdr = (struct rte_tcp_hdr *)(ipv4_hdr1 + 1);
-					tcp_hdr->cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, /* ol_flags: */ 0);
-					m->ol_flags |= PKT_TX_TCP_CKSUM;
-				}
-			}
-		}
-
-		if (lf_pkt == 0) {
-			struct lcore_values *lcore_values = &core_vars[lcore_id];
-			dictionary_flow *lcore_dict = dos_stats[lcore_id].dos_dictionary[state];
-
-			int r = dic_find_flow(lcore_dict, 0);
-			RTE_ASSERT(r == 1);
-
-			// Rate limit non-LF traffic
-			if (lcore_dict->value->sc_counter <= 0) {
-				lcore_values->stats.as_rate_limited++;
-#if LOG_PACKETS
-				printf("[%d] Non-LF rate limit exceeded.\n", lcore_id);
-#endif
-				goto drop_pkt;
-			} else {
-				lcore_dict->value->sc_counter -= ipv4_total_length0;
-			}
-			// Check then for overall rate
-			if (dos_stats[lcore_id].sc_dos_packet_count[state] <= 0) {
-				lcore_values->stats.rate_limited++;
-#if LOG_PACKETS
-				printf("[%d] Non-LF overall rate limit exceeded.\n", lcore_id);
-#endif
-				goto drop_pkt;
-			} else {
-				dos_stats[lcore_id].sc_dos_packet_count[state] -= ipv4_total_length0;
-			}
-		}
-
-		swap_eth_addrs(m);
-
-#if LOG_PACKETS
-		printf("[%d] Forwarding incoming packet:\n", lcore_id);
-		dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
-#endif
-		uint16_t n = rte_eth_tx_buffer(
-			lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
-		(void)n;
-#if LOG_PACKETS
-		if (n > 0) {
-			printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
-		}
-#endif
+		r = handle_inbound_pkt(m, ether_hdr0, ipv4_hdr0, lcore_id, lvars, state);
 	} else if (is_backend(ipv4_hdr0->src_addr)) {
-		if (is_peer(ipv4_hdr0->dst_addr)) {
-			if (unlikely(ipv4_total_length0 != m->data_len - sizeof *ether_hdr0)) {
-				// #if LOG_PACKETS
-				printf(
-					"[%d] Not yet implemented: IP packet length does not match with first buffer segment "
-					"length.\n",
-					lcore_id);
-				// #endif
-				goto drop_pkt;
-			}
-
-			struct rte_ipv4_hdr *ipv4_hdr1;
-			struct rte_udp_hdr *udp_hdr;
-			struct lf_hdr *lf_hdr;
-			RTE_ASSERT(sizeof *ipv4_hdr1 <= UINT16_MAX);
-			RTE_ASSERT(sizeof *udp_hdr <= UINT16_MAX - sizeof *ipv4_hdr1);
-			RTE_ASSERT(sizeof *lf_hdr <= UINT16_MAX - sizeof *ipv4_hdr1 - sizeof *udp_hdr);
-			uint16_t encaps_hdr_len = sizeof *ipv4_hdr1 + sizeof *udp_hdr + sizeof *lf_hdr;
-
-			RTE_ASSERT(sizeof lf_hdr->encaps_pkt_len <= UINT16_MAX);
-			if (unlikely((uint16_t)(sizeof lf_hdr->encaps_pkt_len) > UINT16_MAX - ipv4_total_length0)) {
-				// #if LOG_PACKETS
-				printf("[%d] Not yet implemented: LF packet too big to encapsualte.\n", lcore_id);
-				// #endif
-				goto drop_pkt;
-			}
-
-			uint16_t encaps_trl_len =
-				(16 - (sizeof lf_hdr->encaps_pkt_len + ipv4_total_length0) % 16) % 16;
-			RTE_ASSERT(encaps_trl_len < UINT16_MAX - encaps_hdr_len);
-
-			if (unlikely(encaps_hdr_len + encaps_trl_len > UINT16_MAX - ipv4_total_length0)) {
-				// #if LOG_PACKETS
-				printf("[%d] Not yet implemented: LF packet too big to encapsualte.\n", lcore_id);
-				// #endif
-				goto drop_pkt;
-			}
-
-			rte_be32_t ipv4_hdr_src_addr0 = ipv4_hdr0->src_addr;
-			rte_be32_t ipv4_hdr_dst_addr0 = ipv4_hdr0->dst_addr;
-			rte_be64_t src_ia = backend_ia(ipv4_hdr_src_addr0);
-
-			ipv4_hdr0->hdr_checksum = 0;
-			ipv4_hdr0->src_addr = 0;
-			ipv4_hdr0->dst_addr = 0;
-
-			char *p = rte_pktmbuf_prepend(m, encaps_hdr_len);
-			RTE_ASSERT(p != NULL);
-
-			RTE_ASSERT(sizeof *ether_hdr0 <= encaps_hdr_len);
-			struct rte_ether_hdr *ether_hdr1 =
-				rte_memcpy((char *)ether_hdr0 - encaps_hdr_len, ether_hdr0, sizeof *ether_hdr0);
-
-			RTE_ASSERT(p == (char *)ether_hdr1);
-
-			ipv4_hdr1 = (struct rte_ipv4_hdr *)(ether_hdr1 + 1);
-			ipv4_hdr1->version_ihl = (IPV4_VERSION << 4) | (sizeof *ipv4_hdr1) / RTE_IPV4_IHL_MULTIPLIER;
-			ipv4_hdr1->type_of_service = 0;
-			ipv4_hdr1->total_length = rte_cpu_to_be_16(encaps_hdr_len + ipv4_total_length0);
-			ipv4_hdr1->packet_id = 0;
-			ipv4_hdr1->fragment_offset = rte_cpu_to_be_16(RTE_IPV4_HDR_DF_FLAG);
-			ipv4_hdr1->time_to_live = IP_TTL_DEFAULT;
-			ipv4_hdr1->next_proto_id = IP_PROTO_ID_UDP;
-			ipv4_hdr1->hdr_checksum = 0;
-			ipv4_hdr1->src_addr = ipv4_hdr_src_addr0;
-			ipv4_hdr1->dst_addr = ipv4_hdr_dst_addr0;
-
-			udp_hdr = (struct rte_udp_hdr *)(ipv4_hdr1 + 1);
-			udp_hdr->src_port = rte_cpu_to_be_16(LF_DEFAULT_PORT + lcore_id);
-			udp_hdr->dst_port = rte_cpu_to_be_16(LF_DEFAULT_PORT + lcore_id);
-			udp_hdr->dgram_len = rte_cpu_to_be_16(sizeof *udp_hdr + sizeof *lf_hdr + ipv4_total_length0);
-			udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, /* ol_flags: */ 0);
-
-			lf_hdr = (struct lf_hdr *)(udp_hdr + 1);
-			lf_hdr->lf_pkt_type = 0;
-			lf_hdr->reserved[0] = 0;
-			lf_hdr->reserved[1] = 0;
-			lf_hdr->reserved[2] = 0;
-			lf_hdr->src_ia = src_ia;
-			lf_hdr->encaps_pkt_len = rte_cpu_to_be_16(ipv4_total_length0);
-
-			if (encaps_trl_len != 0) {
-				p = rte_pktmbuf_append(m, encaps_trl_len);
-				RTE_ASSERT(p == (char *)(lf_hdr + 1) + ipv4_total_length0);
-				(void)memset(p, 0, encaps_trl_len);
-			}
-			struct timeval tv;
-			int r = gettimeofday(&tv, NULL);
-			if (unlikely(r != 0)) {
-				RTE_ASSERT(r == -1);
-				// #if LOG_PACKETS
-				printf("[%d] Syscall gettimeofday failed.\n", lcore_id);
-				// #endif
-				goto drop_pkt;
-			}
-			RTE_ASSERT((INT64_MIN <= tv.tv_sec) && (tv.tv_sec <= INT64_MAX));
-			int64_t t_now = tv.tv_sec;
-			struct key_dictionary *d = key_dictionaries[lcore_id];
-			key_dictionary_find(d, src_ia);
-			struct key_store_node *n = d->value;
-			if (n == NULL) {
-				// #if LOG_PACKETS
-				printf("[%d] Key store lookup failed.\n", lcore_id);
-				// #endif
-				goto drop_pkt;
-			}
-			struct delegation_secret *ds = get_delegation_secret(n, t_now);
-			if (ds == NULL) {
-				// #if LOG_PACKETS
-				printf("[%d] Delegation secret lookup failed.\n", lcore_id);
-				// #endif
-				goto drop_pkt;
-			}
-#if LOG_PACKETS
-			printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, src_ia, t_now);
-			dump_hex(lcore_id, ds->key, 16);
-			printf("[%d] }\n", lcore_id);
-#endif
-			compute_lf_chksum(lcore_id,
-				/* drkey: */ ds->key,
-				/* src_addr: */ backend_public_addr(ipv4_hdr_src_addr0),
-				/* dst_addr: */ ipv4_hdr_dst_addr0,
-				/* data: */ &lf_hdr->encaps_pkt_len,
-				/* data_len: */ sizeof lf_hdr->encaps_pkt_len + ipv4_total_length0 + encaps_trl_len,
-				/* chksum: */ lf_hdr->encaps_pkt_chksum,
-				/* rkey_buf: */ roundkey[lcore_id],
-				/* addr_buf: */ key_hosts_addrs[lcore_id]);
-			if (encaps_trl_len != 0) {
-				int r = rte_pktmbuf_trim(m, encaps_trl_len);
-				RTE_ASSERT(r == 0);
-			}
-
-			m->l2_len = sizeof *ether_hdr1;
-			m->l3_len = sizeof *ipv4_hdr1;
-			m->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
-		}
-
-		swap_eth_addrs(m);
-
-#if LOG_PACKETS
-		printf("[%d] Forwarding outgoing packet:\n", lcore_id);
-		dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
-#endif
-		uint16_t n = rte_eth_tx_buffer(
-			lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
-		(void)n;
-#if LOG_PACKETS
-		if (n > 0) {
-			printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
-		}
-#endif
+		r = handle_outbound_pkt(m, ether_hdr0, ipv4_hdr0, lcore_id, lvars);
 	} else {
+		goto drop_pkt;
+	}
+	if (r != 0) {
+		RTE_ASSERT(r == -1);
 		goto drop_pkt;
 	}
 
