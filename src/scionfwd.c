@@ -83,6 +83,7 @@
 #include "hashdict_flow.h"
 #include "key_dictionary.h"
 #include "key_storage.h"
+#include "lf_config.h"
 #include "measurements.h"
 #include "scion_bloom.h"
 
@@ -143,34 +144,6 @@ static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
 #define IP_PROTO_ID_TCP 0x06
 #define IP_PROTO_ID_UDP 0x11
 #define IPV4_VERSION 0x4
-
-/**
- * LF configuration
- */
-
-static uint64_t local_ia = 0x0000000000000000;
-
-struct backend {
-	rte_be32_t private_addr;
-	rte_be32_t public_addr;
-};
-
-static struct backend backends[] = {
-	{
-		.private_addr = 0x00000000 /* big endian */,
-		.public_addr = 0x00000000 /* big endian */,
-	},
-};
-
-struct peer {
-	rte_be32_t public_addr;
-};
-
-static struct peer peers[] = {
-	{
-		.public_addr = 0x00000000 /* big endian */,
-	},
-};
 
 /**
  * LF Header
@@ -358,7 +331,6 @@ int delta_us = 2500000;
 int BLOOM_FILTERS = 2;
 
 // rate-limiter config */
-static uint64_t system_refill_rate; /* global rate-limit (scaled to 100 micro seconds) */
 static uint64_t MAX_POOL_SIZE_FACTOR = 5; /* max allowd pool size (determines max paket burst) */
 static double RESERVE_FRACTION =
 	0.03; /* fraction of rate-limit allocation stored in shared reserve */
@@ -373,14 +345,8 @@ static int numa_on = 0;
 // interactive CLI disabled by default
 static int is_interactive;
 
-// load info from config enabled by default
-// (not all params can be provided via commandline)
-static int from_config_enabled = 1;
-
-// key configurations and rate-limits loaded from config file
-static uint64_t *config_keys;
-static int64_t *config_limits;
-static uint32_t config_nb_keys;
+// Configuration loaded from config file
+static struct lf_config config;
 
 /* tsc-based timers responsible for triggering actions */
 uint64_t tsc_hz; /* only for cycle counting */
@@ -488,14 +454,14 @@ static void swap_eth_addrs(struct rte_mbuf *m) {
 	(void)rte_memcpy(eth->s_addr.addr_bytes, tmp, RTE_ETHER_ADDR_LEN);
 }
 
-static int find_backend(rte_be32_t private_addr, struct backend *b) {
-	size_t i = 0, j = sizeof backends / sizeof backends[0];
-	while ((i != j) && (backends[i].private_addr != private_addr)) {
-		i++;
+static int find_backend(rte_be32_t private_addr, struct lf_config_backend *b) {
+	struct lf_config_backend *x = config.backends;
+	while ((x != NULL) && (x->private_addr != (int32_t)private_addr)) {
+		x = x->next;
 	}
-	if (i != j) {
+	if (x != NULL) {
 		if (b != NULL) {
-			*b = backends[i];
+			*b = *x;
 		}
 		return 1;
 	} else {
@@ -503,14 +469,14 @@ static int find_backend(rte_be32_t private_addr, struct backend *b) {
 	}
 }
 
-static int find_peer(rte_be32_t public_addr, struct peer *p) {
-	size_t i = 0, j = sizeof peers / sizeof peers[0];
-	while ((i != j) && (peers[i].public_addr != public_addr)) {
-		i++;
+static int find_peer(rte_be32_t public_addr, struct lf_config_peer *p) {
+	struct lf_config_peer *x = config.peers;
+	while ((x != NULL) && (x->public_addr != (int32_t)public_addr)) {
+		x = x->next;
 	}
-	if (i != j) {
+	if (x != NULL) {
 		if (p != NULL) {
-			*p = peers[i];
+			*p = *x;
 		}
 		return 1;
 	} else {
@@ -527,7 +493,7 @@ static int is_peer(rte_be32_t public_addr) {
 }
 
 static rte_be32_t backend_public_addr(rte_be32_t private_addr) {
-	struct backend b;
+	struct lf_config_backend b;
 	int r = find_backend(private_addr, &b);
 	RTE_ASSERT(r != 0);
 	return b.public_addr;
@@ -1022,7 +988,7 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 
 		rte_be32_t ipv4_hdr_src_addr0 = ipv4_hdr0->src_addr;
 		rte_be32_t ipv4_hdr_dst_addr0 = ipv4_hdr0->dst_addr;
-		rte_be64_t src_ia = local_ia;
+		rte_be64_t src_ia = config.isd_as;
 
 		ipv4_hdr0->hdr_checksum = 0;
 		ipv4_hdr0->src_addr = 0;
@@ -1757,10 +1723,34 @@ static void metrics_main_loop(void) {
 }
 
 /*
- * init_key_manager sets up the key management data structures. For background information on the
- * general design, see
+ * Key management. For background information on the general design, see
  * https://github.com/scionproto/scion/blob/master/doc/cryptography/DRKeyInfra.md
  */
+
+static void add_key_store_nodes(uint64_t src_ia) {
+	struct key_store *key_store = malloc(sizeof *key_store);
+	if (key_store == NULL) {
+		rte_exit(EXIT_FAILURE, "Allocation of key store failed.\n");
+	}
+	memset(key_store, 0, sizeof *key_store);
+	for (size_t core_id = 0; core_id < RTE_MAX_LCORE; core_id++) {
+		if (!is_in_use[core_id]) {
+			continue;
+		}
+		struct key_store_node *n = malloc(sizeof *n);
+		if (n == NULL) {
+			rte_exit(EXIT_FAILURE, "Allocation of key store node failed.\n");
+		}
+		n->key_index = 0;
+		n->key_store = key_store;
+		int r = key_dictionary_add(key_dictionaries[core_id], src_ia, n);
+		if (r == -1) {
+			rte_exit(EXIT_FAILURE, "Registration of key store node failed.\n");
+		}
+		RTE_ASSERT(r == 0);
+	}
+}
+
 static void init_key_manager(void) {
 	for (size_t core_id = 0; core_id < RTE_MAX_LCORE; core_id++) {
 		RTE_ASSERT(core_id < sizeof is_in_use / sizeof is_in_use[0]);
@@ -1775,29 +1765,11 @@ static void init_key_manager(void) {
 		key_dictionaries[core_id] = d;
 	}
 
-	for (size_t k = 0; k < config_nb_keys; k++) {
-		uint64_t src_ia = config_keys[k];
-		struct key_store *key_store = malloc(sizeof *key_store);
-		if (key_store == NULL) {
-			rte_exit(EXIT_FAILURE, "Allocation of key store failed.\n");
-		}
-		memset(key_store, 0, sizeof *key_store);
-		for (size_t core_id = 0; core_id < RTE_MAX_LCORE; core_id++) {
-			if (!is_in_use[core_id]) {
-				continue;
-			}
-			struct key_store_node *n = malloc(sizeof *n);
-			if (n == NULL) {
-				rte_exit(EXIT_FAILURE, "Allocation of key store node failed.\n");
-			}
-			n->key_index = 0;
-			n->key_store = key_store;
-			int r = key_dictionary_add(key_dictionaries[core_id], src_ia, n);
-			if (r == -1) {
-				rte_exit(EXIT_FAILURE, "Registration of key store node failed.\n");
-			}
-			RTE_ASSERT(r == 0);
-		}
+	for (struct lf_config_peer *p = config.peers; p != NULL; p = p->next) {
+		add_key_store_nodes(p->isd_as);
+	}
+	if (config.backends != NULL) {
+		add_key_store_nodes(config.isd_as);
 	}
 
 	min_key_validity = DEFAULT_KEY_VALIDITY;
@@ -1981,9 +1953,9 @@ static void key_manager_main_loop(void) {
 					while (n != NULL) {
 						struct delegation_secret *ds = get_delegation_secret(n->value, t_now);
 						if (ds == NULL) {
-							fetch_delegation_secrets(n->value, n->key, local_ia, t_now);
+							fetch_delegation_secrets(n->value, n->key, config.isd_as, t_now);
 						} else {
-							check_adjacent_delegation_secrets(n->value, n->key, local_ia);
+							check_adjacent_delegation_secrets(n->value, n->key, config.isd_as);
 						}
 						n = n->next;
 					}
@@ -2055,7 +2027,7 @@ static void init_dos(void) {
 
 	// for each AS store the create and link the per-AS reserve and intialize the counters and refill
 	// rates with the values read from the configuration file
-	for (uint8_t key_index = 0; key_index < config_nb_keys; key_index++) {
+	for (struct lf_config_peer *p = config.peers; p != NULL; p = p->next) {
 		// create reserves for that AS shared among all lcores (atomic counter)
 		rte_atomic64_t *reserve_as_odd = malloc(sizeof *reserve_as_odd);
 		rte_atomic64_t *reserve_as_even = malloc(sizeof *reserve_as_even);
@@ -2072,32 +2044,31 @@ static void init_dos(void) {
 			counter = malloc(sizeof *counter);
 			counter->secX_counter = 0;
 			counter->sc_counter = 0;
-			counter->refill_rate = config_limits[key_index];
+			counter->refill_rate = p->rate_limit;
 			counter->reserve = reserve_as_odd; // pointer to reserve atomic
-			dic_add_flow(dos_stat->dos_dictionary[ODD], config_keys[key_index], counter);
+			dic_add_flow(dos_stat->dos_dictionary[ODD], p->isd_as, counter);
 
 			// create dos_counter for even dictionary
 			counter = malloc(sizeof *counter);
 			counter->secX_counter = 0;
 			counter->sc_counter = 0;
-			counter->refill_rate = config_limits[key_index];
+			counter->refill_rate = p->rate_limit;
 			counter->reserve = reserve_as_even; // pointer to reserve atomic
-			dic_add_flow(dos_stat->dos_dictionary[EVEN], config_keys[key_index], counter);
+			dic_add_flow(dos_stat->dos_dictionary[EVEN], p->isd_as, counter);
 
 			// create dos_counter for PREVIOUS odd dictionary
 			counter = malloc(sizeof *counter);
 			counter->secX_counter = 0;
 			counter->sc_counter = 0;
-			counter->refill_rate = config_limits[key_index];
-			dic_add_flow(previous_dos_stat[core_id].dos_dictionary[ODD], config_keys[key_index], counter);
+			counter->refill_rate = p->rate_limit;
+			dic_add_flow(previous_dos_stat[core_id].dos_dictionary[ODD], p->isd_as, counter);
 
 			// create dos_counter for PREVIOUS even dictionary
 			counter = malloc(sizeof *counter);
 			counter->secX_counter = 0;
 			counter->sc_counter = 0;
-			counter->refill_rate = config_limits[key_index];
-			dic_add_flow(
-				previous_dos_stat[core_id].dos_dictionary[EVEN], config_keys[key_index], counter);
+			counter->refill_rate = p->rate_limit;
+			dic_add_flow(previous_dos_stat[core_id].dos_dictionary[EVEN], p->isd_as, counter);
 		}
 	}
 }
@@ -2157,7 +2128,7 @@ static void dos_main_loop(void) {
 			int64_t used_sc = 0;
 			int64_t used_secX_sum = 0;
 			int64_t used_sc_sum = 0;
-			int64_t refill_rate = system_refill_rate; // global refill rate
+			int64_t refill_rate = config.system_limit; // global refill rate
 			int64_t MAX_POOL_SIZE = refill_rate * MAX_POOL_SIZE_FACTOR;
 
 			// aggregate over all lcores
@@ -2333,203 +2304,27 @@ static void dos_main_loop(void) {
 	}
 }
 
-/*
- * function to load rate limits from the end_hosts.cfg file
- * This function is called at start-up and whenever the CLI sees the reload commands
- * To load the cfg file is parsed in a simple fashion
- * in the file rate limits are specified as bps, we convert this to bytes / 100 micro-seconds
- * limits are divided by 1.042 (Magic constant, i don't no why but without the rate-limits are too
- * high)
- */
-static int load_rate_limits(const char *file_name) {
-	int32_t nb_keys = 0;
-	int index = 0;
-	void *fgets_res;
-	uint64_t *keys = NULL;
-	int64_t *limits = NULL;
-	int64_t *raw_limits = NULL;
-
-	// open cfg file
-	FILE *fp = fopen(file_name, "r");
-	if (fp == NULL) {
-		printf("Unable to open file %s!", file_name);
+static int load_config(const char *path) {
+	lf_config_release(&config);	
+	int r = lf_config_load(&config, path);
+	if (r != 0) {
+		RTE_ASSERT(r == -1);
 		return -1;
 	}
 
-	char line[256];
-	char arg[256];
-	double val;
-
-	// read all lines
-	while (fgets(line, sizeof line, fp) != NULL) {
-		if (line[0] == '#') {
-			continue;
-		}
-		if (strcmp(line, "system_limit:\n") == 0) { // global system limit
-			fgets_res = fgets(arg, sizeof arg, fp);
-			if (fgets_res == NULL) {
-				return -1;
-			}
-			val = strtoll(arg, NULL, 10);
-			system_refill_rate =
-				(int64_t)((val / 8) / 10000)
-				/ 1.042; // convert limit to bytes and shrink to 100 microseconds interval
-		} else if (strcmp(line, "number_of_entries:\n") == 0) { // number of AS entries in the file
-			fgets_res = fgets(arg, sizeof arg, fp);
-			if (fgets_res == NULL) {
-				return -1;
-			}
-			nb_keys = strtol(arg, NULL, 10);
-			if (nb_keys < 1) {
-				return -1;
-			}
-			keys = malloc(sizeof *keys * nb_keys); // allocate arrays depending on the size
-			limits = malloc(sizeof *limits * nb_keys);
-			raw_limits = malloc(sizeof *raw_limits * nb_keys);
-		} else if (strcmp(line, "as:\n") == 0) { // AS entry
-			if ((nb_keys - index) <= 0)
-			{ // check whether there are more entries than was specified and abort
-				fclose(fp);
-				return -1;
-			}
-			fgets_res = fgets(arg, sizeof arg, fp); // AS id
-			if (fgets_res == NULL) {
-				return -1;
-			}
-			keys[index] = strtoll(arg, NULL, 16);
-
-			fgets_res = fgets(arg, sizeof arg, fp); // useless (format specific)
-			fgets_res = fgets(arg, sizeof arg, fp); // rate-limit
-			if (fgets_res == NULL) {
-				return -1;
-			}
-			raw_limits[index] = strtoll(arg, NULL, 10);
-			val = raw_limits[index];
-			limits[index] = (int64_t)((val / 8) / 10000)
-											/ 1.042; // convert limit to bytes and shrink to 100 microseconds interval
-			index++;
-		}
+	/*
+	 * The rate limits are specified as bps, we convert this to bytes / 100 micro-seconds limits are
+	 * divided by 1.042 (Magic constant, I don't no why but without the rate-limits are too high)
+	 */
+	config.system_limit = (uint64_t)((config.system_limit / 8) / 10000)
+		/ 1.042; // convert limit to bytes and shrink to 100 microseconds interval
+	struct lf_config_peer *p = config.peers;
+	while (p != NULL) {
+		p->rate_limit = (uint64_t)((p->rate_limit / 8) / 10000)
+			/ 1.042; // convert limit to bytes and shrink to 100 microseconds interval
+		p = p->next;
 	}
 
-	if (nb_keys < 0) {
-		fclose(fp);
-		return -1;
-	}
-
-	// display the new rate limits to the user, so he can see the changes
-	printf("Stored %d rate limits\n", nb_keys);
-	for (index = 0; index < nb_keys; index++) {
-		printf("   AS: %" PRIu64 " -> %" PRId64 " bps\n", keys[index], raw_limits[index]);
-	}
-	printf("\n");
-
-	// update global storage
-	config_nb_keys = nb_keys;
-	config_keys = keys;
-	config_limits = limits;
-
-	return 0;
-}
-
-/*
- * loads the system configuration from teh scion_filter.cfg file
- * This is done at start-up
- * The arguments are parsed and stored in the global variables
- */
-static int load_config(const char *file_name) {
-	void *fgets_res;
-
-	// open file
-	FILE *fp = fopen(file_name, "r");
-	if (fp == NULL) {
-		printf("Unable to open file %s!", file_name);
-		return -1;
-	}
-
-	char line[256];
-	char arg[256];
-
-	// read each line
-	while (fgets(line, sizeof line, fp) != NULL) {
-		if (line[0] == '#') {
-			continue;
-		}
-		if (strcmp(line, "rx_port_mask:\n") == 0) {
-			fgets_res = fgets(arg, sizeof arg, fp);
-			if (fgets_res == NULL) {
-				return -1;
-			}
-			scionfwd_rx_port_mask = strtol(arg, NULL, 10);
-		} else if (strcmp(line, "tx_bypass_port_mask:\n") == 0) {
-			fgets_res = fgets(arg, sizeof arg, fp);
-			if (fgets_res == NULL) {
-				return -1;
-			}
-			scionfwd_tx_bypass_port_mask = strtol(arg, NULL, 10);
-		} else if (strcmp(line, "tx_firewall_port_mask:\n") == 0) {
-			fgets_res = fgets(arg, sizeof arg, fp);
-			if (fgets_res == NULL) {
-				return -1;
-			}
-			scionfwd_tx_firewall_port_mask = strtol(arg, NULL, 10);
-		} else if (strcmp(line, "stats_interval:\n") == 0) {
-			fgets_res = fgets(arg, sizeof arg, fp);
-			if (fgets_res == NULL) {
-				return -1;
-			}
-			int timer_secs = strtol(arg, NULL, 10);
-			if (timer_secs >= 0) {
-				slice_timer_period = timer_secs;
-				slice_timer_period_seconds = timer_secs;
-			}
-		} else if (strcmp(line, "nb_bloom_filters:\n") == 0) {
-			fgets_res = fgets(arg, sizeof arg, fp);
-			if (fgets_res == NULL) {
-				return -1;
-			}
-			BLOOM_FILTERS = strtol(arg, NULL, 10);
-		} else if (strcmp(line, "bloom_filter_entries:\n") == 0) {
-			fgets_res = fgets(arg, sizeof arg, fp);
-			if (fgets_res == NULL) {
-				return -1;
-			}
-			NUM_BLOOM_ENTRIES = strtol(arg, NULL, 10);
-		} else if (strcmp(line, "bloom_filter_error_rate:\n") == 0) {
-			fgets_res = fgets(arg, sizeof arg, fp);
-			if (fgets_res == NULL) {
-				return -1;
-			}
-			BLOOM_ERROR_RATE = strtol(arg, NULL, 10);
-		} else if (strcmp(line, "bloom_filter_rotation_rate:\n") == 0) {
-			fgets_res = fgets(arg, sizeof arg, fp);
-			if (fgets_res == NULL) {
-				return -1;
-			}
-			delta_us = strtol(arg, NULL, 10);
-		} else if (strcmp(line, "drkey_grace_period:\n") == 0) {
-			fgets_res = fgets(arg, sizeof arg, fp);
-			if (fgets_res == NULL) {
-				return -1;
-			}
-			max_key_validity_extension = strtol(arg, NULL, 10);
-		} else if (strcmp(line, "max_pool_size_factor:\n") == 0) {
-			fgets_res = fgets(arg, sizeof arg, fp);
-			if (fgets_res == NULL) {
-				return -1;
-			}
-			MAX_POOL_SIZE_FACTOR = strtol(arg, NULL, 10);
-		} else if (strcmp(line, "reserve_fraction:\n") == 0) {
-			fgets_res = fgets(arg, sizeof arg, fp);
-			if (fgets_res == NULL) {
-				return -1;
-			}
-			double var = atof(arg);
-			if (var >= 0.0 && var <= 1.0) { // check if valid fraction in [0, 1]
-				RESERVE_FRACTION = var;
-			}
-		}
-	}
-	fclose(fp);
 	return 0;
 }
 
@@ -2537,7 +2332,6 @@ static int load_config(const char *file_name) {
 static void print_cli_usage(void) {
 	printf(
 		"Currently supported CLI commands:\n\n"
-		"  reload  Reloads the rate-limit config file\n"
 		"    stop  terminates the application\n"
 		"    help  Prints this info\n\n");
 }
@@ -2556,9 +2350,7 @@ static int cli_read_line(void) {
 	if (res < 0) {
 		return 1;
 	}
-	if (strcmp(line, "reload\n") == 0) {
-		load_rate_limits("config/end_hosts.cfg");
-	} else if (strcmp(line, "stop\n") == 0) {
+	if (strcmp(line, "stop\n") == 0) {
 		force_quit = true;
 		return 0;
 	} else {
@@ -2766,11 +2558,6 @@ static int scionfwd_parse_args(int argc, char **argv) {
 			/* enable interactive mode */
 			case 'i':
 				is_interactive = 1;
-				break;
-
-			/* load from config */
-			case 'l':
-				from_config_enabled = true;
 				break;
 
 			/* enable numa alloc */
@@ -2996,16 +2783,11 @@ int main(int argc, char **argv) {
 	if (nb_active_ports == 0)
 		rte_exit(EXIT_FAILURE, "No Ethernet ports - bye\n");
 
-	// read config file
-	if (from_config_enabled) {
-		ret = load_config("config/scion_filter.cfg");
-		if (ret < 0) {
-			rte_exit(EXIT_FAILURE, "Could not parse config from provided file\n");
-		}
-	}
-
 	// read rate-limit config file
-	load_rate_limits("config/end_hosts.cfg");
+	int r = load_config("config/end_hosts.cfg");
+	if (r < 0) {
+		rte_exit(EXIT_FAILURE, "Could not load config from provided file\n");
+	}
 
 	/* reset scionfwd_ports */
 	for (port_id = 0; port_id < RTE_MAX_ETHPORTS; port_id++) {
