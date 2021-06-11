@@ -5,6 +5,7 @@ struct lf_config_backend {
 	struct lf_config_backend *next;
 	int32_t public_addr;
 	int32_t private_addr;
+	uint8_t ether_addr[6];
 };
 
 struct lf_config_peer {

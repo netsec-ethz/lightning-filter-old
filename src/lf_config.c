@@ -223,6 +223,49 @@ static void reader_read_selector(struct reader *rd, char *val, size_t length) {
 	}
 }
 
+static void reader_read_ether_addr(struct reader *rd, uint8_t val[6]) {
+	reader_skip_forward(rd);
+	if (rd->state == READER_STATE_ERROR) {
+		return;
+	}
+	char addrstr[sizeof "aa:bb:cc:dd:ee:ff"];
+	reader_read_string(rd, addrstr, sizeof addrstr);
+	if (rd->state == READER_STATE_ERROR) {
+		return;
+	}
+	size_t i = 0;
+	size_t k = 0;
+	do {
+		if (k != 0) {
+			assert(i < sizeof addrstr);
+			if (addrstr[i] != ':') {
+				rd->state = READER_STATE_ERROR;
+				return;
+			}
+			i++;
+		}
+		val[k] = 0;
+		size_t j = i;
+		do {
+			assert(j < sizeof addrstr);
+			int x = addrstr[j];
+			if (('0' <= x) && (x <= '9')) {
+				val[k] = (val[k] << 4) | (x - '0');
+			} else if (('a' <= x) && (x <= 'f')) {
+				val[k] = (val[k] << 4) | (x - 'a' + 10);
+			} else {
+				rd->state = READER_STATE_ERROR;
+				return;
+			}
+			j++;
+		} while (j - i != 2);
+		i += 2;
+		k++;
+	} while (k != 6);
+	assert(i < sizeof addrstr);
+	assert(addrstr[i] == '\0');
+}
+
 static void reader_read_ipv4_addr(struct reader *rd, int32_t *val) {
 	reader_skip_forward(rd);
 	if (rd->state == READER_STATE_ERROR) {
@@ -423,6 +466,7 @@ static void reader_read_backends(struct reader *rd, struct lf_config *c) {
 		}
 		int32_t public_addr = 0;
 		int32_t private_addr = 0;
+		uint8_t ether_addr[6] = {0x0, 0x0, 0x0, 0x0, 0x0, 0x0};
 		do {
 			char selector[256];
 			reader_read_selector(rd, selector, sizeof selector);
@@ -433,6 +477,8 @@ static void reader_read_backends(struct reader *rd, struct lf_config *c) {
 				reader_read_ipv4_addr(rd, &public_addr);
 			} else if (strncmp(selector, "private_addr", sizeof selector) == 0) {
 				reader_read_ipv4_addr(rd, &private_addr);
+			} else if (strncmp(selector, "ether_addr", sizeof selector) == 0) {
+				reader_read_ether_addr(rd, ether_addr);
 			} else {
 				reader_skip_value(rd);
 			}
@@ -456,6 +502,12 @@ static void reader_read_backends(struct reader *rd, struct lf_config *c) {
 		x->next = NULL;
 		x->public_addr = public_addr;
 		x->private_addr = private_addr;
+		x->ether_addr[0] = ether_addr[0];
+		x->ether_addr[1] = ether_addr[1];
+		x->ether_addr[2] = ether_addr[2];
+		x->ether_addr[3] = ether_addr[3];
+		x->ether_addr[4] = ether_addr[4];
+		x->ether_addr[5] = ether_addr[5];
 		if (b == NULL) {
 			assert(c->backends == NULL);
 			c->backends = x;
