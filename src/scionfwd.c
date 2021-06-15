@@ -2370,7 +2370,7 @@ static void dos_main_loop(void) {
 }
 
 static int load_config(const char *path) {
-	lf_config_release(&config);	
+	lf_config_release(&config);
 	int r = lf_config_load(&config, path);
 	if (r != 0) {
 		RTE_ASSERT(r == -1);
