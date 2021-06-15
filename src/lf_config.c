@@ -555,6 +555,7 @@ static void reader_read_peers(struct reader *rd, struct lf_config *c) {
 		int64_t isd_as = 0;
 		int32_t public_addr = 0;
 		uint64_t rate_limit = 0;
+		uint8_t ether_addr[6] = {0x0, 0x0, 0x0, 0x0, 0x0, 0x0};
 		do {
 			char selector[256];
 			reader_read_selector(rd, selector, sizeof selector);
@@ -567,6 +568,8 @@ static void reader_read_peers(struct reader *rd, struct lf_config *c) {
 				reader_read_ipv4_addr(rd, &public_addr);
 			} else if (strncmp(selector, "rate_limit", sizeof selector) == 0) {
 				reader_read_rate_limit(rd, &rate_limit);
+			} else if (strncmp(selector, "ether_addr", sizeof selector) == 0) {
+				reader_read_ether_addr(rd, ether_addr);
 			} else {
 				reader_skip_value(rd);
 			}
@@ -591,6 +594,12 @@ static void reader_read_peers(struct reader *rd, struct lf_config *c) {
 		x->isd_as = isd_as;
 		x->public_addr = public_addr;
 		x->rate_limit = rate_limit;
+		x->ether_addr[0] = ether_addr[0];
+		x->ether_addr[1] = ether_addr[1];
+		x->ether_addr[2] = ether_addr[2];
+		x->ether_addr[3] = ether_addr[3];
+		x->ether_addr[4] = ether_addr[4];
+		x->ether_addr[5] = ether_addr[5];
 		if (p == NULL) {
 			assert(c->peers == NULL);
 			c->peers = x;

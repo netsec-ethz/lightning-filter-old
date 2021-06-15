@@ -13,6 +13,7 @@ struct lf_config_peer {
 	int64_t isd_as;
 	int32_t public_addr;
 	uint64_t rate_limit;
+	uint8_t ether_addr[6];
 };
 
 struct lf_config {
