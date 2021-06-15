@@ -89,7 +89,8 @@
 
 /* defines */
 
-#define SIMPLE_FORWARD 0
+#define SIMPLE_L2_FORWARD 0
+#define SIMPLE_GW_FORWARD 0
 
 #define ENABLE_KEY_MANAGEMENT 0
 #define ENABLE_MEASUREMENTS 0
@@ -430,19 +431,6 @@ static int crypto_cmp_16(const void *x, const void *y) {
 	d |= a[15] ^ b[15];
 	return (1 & ((d - 1) >> 8)) - 1;
 }
-
-#if 0
-static void
-setfwd_eth_addrs(struct rte_mbuf *m)
-{
-	struct rte_ether_hdr *eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
-
-	uint8_t dst[] = {0x0a, 0x69, 0xb4, 0xe8, 0x18, 0xbc};
-
-	(void)rte_memcpy(eth->s_addr.addr_bytes, eth->d_addr.addr_bytes, RTE_ETHER_ADDR_LEN);
-	(void)rte_memcpy(eth->d_addr.addr_bytes, dst, RTE_ETHER_ADDR_LEN);
-}
-#endif
 
 static void swap_eth_addrs(struct rte_mbuf *m) {
 	struct rte_ether_hdr *eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
@@ -1105,24 +1093,6 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 
 static void scionfwd_simple_forward(
 	struct rte_mbuf *m, const unsigned lcore_id, struct lcore_values *lvars, int16_t state) {
-#if SIMPLE_FORWARD
-	swap_eth_addrs(m);
-
-	#if LOG_PACKETS
-	printf("[%d] Forwarding outgoing packet:\n", lcore_id);
-	dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
-	#endif
-	uint16_t n = rte_eth_tx_buffer(
-		lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
-	(void)n;
-	#if LOG_PACKETS
-	if (n > 0) {
-		printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
-	}
-	#endif
-	return;
-#endif
-
 #if CHECK_PACKET_STRUCTURE
 	if (unlikely(m->data_len != m->pkt_len)) {
 		// #if LOG_PACKETS
@@ -1180,6 +1150,89 @@ drop_pkt:
 #if LOG_PACKETS
 	printf("[%d] Dropping packet.\n", lcore_id);
 #endif
+	rte_pktmbuf_free(m);
+}
+
+static void scionfwd_simple_gw_forward(
+	struct rte_mbuf *m, const unsigned lcore_id, struct lcore_values *lvars, int16_t state) {
+	(void)state;
+
+	swap_eth_addrs(m);
+
+	#if LOG_PACKETS
+	printf("[%d] Forwarding outgoing packet:\n", lcore_id);
+	dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
+	#endif
+	uint16_t n = rte_eth_tx_buffer(
+		lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
+	(void)n;
+	#if LOG_PACKETS
+	if (n > 0) {
+		printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
+	}
+	#endif
+}
+
+static void scionfwd_simple_l2_forward(
+	struct rte_mbuf *m, const unsigned lcore_id, struct lcore_values *lvars, int16_t state) {
+	(void)state;
+
+	struct rte_ether_hdr *l2_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
+	uint16_t ether_type = l2_hdr->ether_type;
+
+	if (ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
+		struct rte_ipv4_hdr *l3_hdr = (struct rte_ipv4_hdr *)(l2_hdr + 1);
+		struct lf_config_backend b;
+		int r = find_backend(l3_hdr->dst_addr, &b);
+		if (r) {
+			struct rte_ether_addr tx_ether_addr;
+			rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
+
+			(void)rte_memcpy(&l2_hdr->s_addr, &tx_ether_addr, sizeof l2_hdr->s_addr);
+			(void)rte_memcpy(&l2_hdr->d_addr, &b.ether_addr, sizeof l2_hdr->d_addr);
+
+			#if LOG_PACKETS
+				printf("[%d] Forwarding outgoing packet:\n", lcore_id);
+				dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
+			#endif
+			uint16_t n = rte_eth_tx_buffer(
+				lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
+			(void)n;
+			#if LOG_PACKETS
+			if (n > 0) {
+				printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
+			}
+			#endif
+			return;
+		}
+		r = find_backend(l3_hdr->src_addr, &b);
+		if (r) {
+			struct lf_config_peer p;
+			r = find_peer(l3_hdr->dst_addr, &p);
+			if (r) {
+				struct rte_ether_addr tx_ether_addr;
+				rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
+
+				(void)rte_memcpy(&l2_hdr->s_addr, &tx_ether_addr, sizeof l2_hdr->s_addr);
+				(void)rte_memcpy(&l2_hdr->d_addr, &p.ether_addr, sizeof l2_hdr->d_addr);
+
+				#if LOG_PACKETS
+					printf("[%d] Forwarding outgoing packet:\n", lcore_id);
+					dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
+				#endif
+				uint16_t n = rte_eth_tx_buffer(
+					lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
+				(void)n;
+				#if LOG_PACKETS
+				if (n > 0) {
+					printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
+				}
+				#endif
+				return;
+			}
+		}
+	}
+	/* drop packet */
 	rte_pktmbuf_free(m);
 }
 
@@ -1292,7 +1345,19 @@ static void scionfwd_main_loop(void) {
 				last_dos_slice_tsc = cur_tsc;
 			}
 
+#if SIMPLE_L2_FORWARD
+			(void)scionfwd_simple_forward;
+			(void)scionfwd_simple_gw_forward;
+			scionfwd_simple_l2_forward(m, lcore_id, lvars, state);
+#elif SIMPLE_GW_FORWARD
+			(void)scionfwd_simple_forward;
+			(void)scionfwd_simple_l2_forward;
+			scionfwd_simple_gw_forward(m, lcore_id, lvars, state);
+#else
+			(void)scionfwd_simple_gw_forward;
+			(void)scionfwd_simple_l2_forward;
 			scionfwd_simple_forward(m, lcore_id, lvars, state);
+#endif
 
 #if ENABLE_MEASUREMENTS
 			msmts->dup_cnt++;
