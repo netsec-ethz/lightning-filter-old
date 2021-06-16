@@ -3258,7 +3258,7 @@ int main(int argc, char **argv) {
 				queue_id++;
 			}
 
-			if (queue_id >= nb_tx_bypass_queues_per_port + nb_tx_firewall_queues_per_port) {
+			if (queue_id >= nb_tx_firewall_queues_per_port) {
 				break;
 			}
 		}
