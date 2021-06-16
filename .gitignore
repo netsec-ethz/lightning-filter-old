@@ -2,3 +2,5 @@
 *.o
 src/build/
 src/lib/drkey/libdrkey.h
+src/test/scion/c
+src/test/scion/s
