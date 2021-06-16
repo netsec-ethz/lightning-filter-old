@@ -98,7 +98,11 @@
 #define ENFORCE_LF_RATE_LIMIT_FILTER 1
 #define LOG_DELEGATION_SECRETS 0
 #define LOG_PACKETS 0
-#define CHECK_PACKET_STRUCTURE 1
+#define CHECK_PACKET_STRUCTURE 0
+
+// deployment
+#define UNIDIRECTIONAL_SETUP 1
+#define AWS_DEPLOYMENT 0
 
 // logging
 #define RTE_LOGTYPE_scionfwd RTE_LOGTYPE_USER1
@@ -145,6 +149,10 @@ static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
 #define IP_PROTO_ID_TCP 0x06
 #define IP_PROTO_ID_UDP 0x11
 #define IPV4_VERSION 0x4
+
+// Cryptography related constants
+#define BLOCK_SIZE 16
+#define IV_SIZE 16
 
 /**
  * LF Header
@@ -222,7 +230,7 @@ typedef struct dos_statistic {
 	rte_atomic64_t *reserve[2];
 } dos_statistic;
 
-/* arrary contatining the dos stat structs for each core,
+/* array contatining the dos stat structs for each core,
  * once for the current period and once for the previous */
 struct dos_statistic dos_stats[RTE_MAX_LCORE];
 struct dos_statistic previous_dos_stat[RTE_MAX_LCORE];
@@ -231,12 +239,13 @@ struct dos_statistic previous_dos_stat[RTE_MAX_LCORE];
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
 		.mq_mode = ETH_MQ_RX_RSS,
-		.max_rx_pkt_len = RTE_ETHER_MAX_LEN, /* max packet lenght capped to ETHERNET MTU */
+		.max_rx_pkt_len = RTE_ETHER_MAX_LEN, /* max packet length capped to ETHERNET MTU */
 		.split_hdr_size = 0,
 	},
 	.rx_adv_conf = {
 		.rss_conf = { /* configuration according to NIC capability */
 			.rss_key = NULL,
+#if AWS_DEPLOYMENT
 			.rss_hf = ETH_RSS_IPV4
 				| ETH_RSS_FRAG_IPV4
 				| ETH_RSS_NONFRAG_IPV4_TCP
@@ -252,6 +261,19 @@ static struct rte_eth_conf port_conf = {
 				| ETH_RSS_IPV6_EX
 				| ETH_RSS_IPV6_TCP_EX
 				| ETH_RSS_IPV6_UDP_EX
+#else
+			.rss_hf = ETH_RSS_FRAG_IPV4
+				| ETH_RSS_NONFRAG_IPV4_TCP
+				| ETH_RSS_NONFRAG_IPV4_UDP
+				| ETH_RSS_NONFRAG_IPV4_SCTP
+				| ETH_RSS_NONFRAG_IPV4_OTHER
+				| ETH_RSS_FRAG_IPV6
+				| ETH_RSS_NONFRAG_IPV6_TCP
+				| ETH_RSS_NONFRAG_IPV6_UDP
+				| ETH_RSS_NONFRAG_IPV6_SCTP
+				| ETH_RSS_NONFRAG_IPV6_OTHER
+				| ETH_RSS_L2_PAYLOAD
+#endif
 		},
 	},
 	.txmode = {
@@ -353,7 +375,7 @@ static struct lf_config config;
 uint64_t tsc_hz; /* only for cycle counting */
 static uint64_t slice_timer_period = 1800; /* #seconds for each bucket, scaled to hertz */
 static uint64_t slice_timer_period_seconds = 1800; /* #seconds for each bucket, unscaled, seconds */
-static uint64_t dos_slice_period; /* lenght of a rate limit slice (100 micro seconds) */
+static uint64_t dos_slice_period; /* length of a rate limit slice (100 micro seconds) */
 
 /* number of packets that the host wants to receive maximally. 0 if no limit
  * limit is number of packets per second
@@ -509,10 +531,11 @@ static struct delegation_secret *get_delegation_secret(struct key_store_node *n,
 	return ds;
 }
 
-static void compute_lf_chksum(const unsigned lcore_id, unsigned char drkey[16], rte_be32_t src_addr,
-	rte_be32_t dst_addr, void *data, size_t data_len, unsigned char chksum[16],
-	unsigned char rkey_buf[10 * 16], unsigned char addr_buf[32]) {
-	RTE_ASSERT(data_len % 16 == 0);
+static void compute_lf_chksum(const unsigned lcore_id, unsigned char drkey[BLOCK_SIZE], rte_be32_t src_addr,
+	rte_be32_t dst_addr, void *data, size_t data_len, unsigned char chksum[BLOCK_SIZE],
+	unsigned char rkey_buf[10 * BLOCK_SIZE], unsigned char addr_buf[32]) {
+
+	RTE_ASSERT(data_len % BLOCK_SIZE == 0);
 	RTE_ASSERT(data_len <= INT_MAX);
 	(void)memset(addr_buf, 0, 32);
 	(void)rte_memcpy(addr_buf, &src_addr, sizeof src_addr);
@@ -521,22 +544,26 @@ static void compute_lf_chksum(const unsigned lcore_id, unsigned char drkey[16], 
 #if defined __x86_64__ && __x86_64__
 	(void)lcore_id;
 
-	memset(rkey_buf, 0, 10 * 16);
-	ExpandKey128(drkey, rkey_buf);
-	CBCMAC(rkey_buf, 32 / 16, addr_buf, chksum);
-	memset(rkey_buf, 0, 10 * 16);
-	ExpandKey128(chksum, rkey_buf);
-	CBCMAC(rkey_buf, data_len / 16, data, chksum);
+	// derive the second-order key based on the first order key
+	(void)memset(rkey_buf, 0, 10 * BLOCK_SIZE);
+	(void)ExpandKey128(drkey, rkey_buf);
+	(void)CBCMAC(rkey_buf, 32 / BLOCK_SIZE, addr_buf, chksum);
+
+	// compute per-packet MAC using the second-order key
+	(void)memset(rkey_buf, 0, 10 * BLOCK_SIZE);
+	(void)ExpandKey128(chksum, rkey_buf);
+	(void)CBCMAC(rkey_buf, data_len / BLOCK_SIZE, data, chksum);
 #else
 	(void)rkey_buf;
 
 	int r, n;
-	unsigned char key[16], iv[16];
+	unsigned char key[BLOCK_SIZE], iv[IV_SIZE];
 
 	EVP_CIPHER_CTX *ctx = cipher_ctx[lcore_id];
 
-	(void)rte_memcpy(key, drkey, 16);
-	(void)memset(iv, 0, 16);
+	// derive the second-order key based on the first order key
+	(void)rte_memcpy(key, drkey, BLOCK_SIZE);
+	(void)memset(iv, 0, IV_SIZE);
 	r = EVP_CIPHER_CTX_reset(ctx);
 	RTE_ASSERT(r == 1);
 	r = EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, key, iv);
@@ -548,8 +575,9 @@ static void compute_lf_chksum(const unsigned lcore_id, unsigned char drkey[16], 
 	r = EVP_EncryptFinal_ex(ctx, &chksum[n], &n);
 	RTE_ASSERT((r == 1) && (n == 0));
 
-	(void)rte_memcpy(key, chksum, 16);
-	(void)memset(iv, 0, 16);
+	// compute per-packet MAC using the second-order key
+	(void)rte_memcpy(key, chksum, BLOCK_SIZE);
+	(void)memset(iv, 0, IV_SIZE);
 	r = EVP_CIPHER_CTX_reset(ctx);
 	RTE_ASSERT(r == 1);
 	r = EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, key, iv);
@@ -667,14 +695,15 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 			}
 #endif
 
+			// compute trailer length such that we get a multiple of 16 as data input size
 			uint16_t encaps_trl_len = (16 - (sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len) % 16) % 16;
-
 			if (encaps_trl_len != 0) {
 				char *p = rte_pktmbuf_append(m, encaps_trl_len);
 				RTE_ASSERT(p == (char *)(lf_hdr + 1) + encaps_pkt_len);
 				(void)memset(p, 0, encaps_trl_len);
 			}
 			unsigned char *chksum = computed_cmac[lcore_id];
+
 			struct timeval tv_now;
 			int r = gettimeofday(&tv_now, NULL);
 			if (unlikely(r != 0)) {
@@ -686,6 +715,7 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 			}
 			RTE_ASSERT((INT64_MIN <= tv_now.tv_sec) && (tv_now.tv_sec <= INT64_MAX));
 			int64_t t_now = tv_now.tv_sec;
+
 			struct key_dictionary *d = key_dictionaries[lcore_id];
 			key_dictionary_find(d, lf_hdr->src_ia);
 			struct key_store_node *n = d->value;
@@ -707,6 +737,7 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 			dump_hex(lcore_id, ds->key, 16);
 			printf("[%d] }\n", lcore_id);
 #endif
+
 			compute_lf_chksum(lcore_id,
 				/* drkey: */ ds->key,
 				/* src_addr: */ ipv4_hdr_src_addr0,
@@ -717,8 +748,10 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 				/* rkey_buf: */ roundkey[lcore_id],
 				/* addr_buf: */ key_hosts_addrs[lcore_id]);
 			bool is_chksum_valid = crypto_cmp_16(lf_hdr->encaps_pkt_chksum, chksum) == 0;
+
 			if (unlikely(
 						!is_chksum_valid && (ds->validity_not_after - t_now < max_key_validity_extension))) {
+				// the current delegation secret has expired -> try again with the next delegation secret
 				ds = &n->key_store->delegation_secrets[NEXT_KEY_INDEX(n->key_index)];
 				if (ds->validity_not_before < ds->validity_not_after) {
 #if LOG_PACKETS
@@ -740,6 +773,7 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 			}
 			if (unlikely(
 						!is_chksum_valid && (t_now - ds->validity_not_before < max_key_validity_extension))) {
+				// the current delegation secret is not valid yet -> try again with the previous delegation secret
 				ds = &n->key_store->delegation_secrets[PREV_KEY_INDEX(n->key_index)];
 				if (ds->validity_not_before < ds->validity_not_after) {
 #if LOG_PACKETS
@@ -915,7 +949,9 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 		}
 	}
 
+#if !UNIDIRECTIONAL_SETUP
 	swap_eth_addrs(m);
+#endif
 
 #if LOG_PACKETS
 	printf("[%d] Forwarding incoming packet:\n", lcore_id);
@@ -959,7 +995,7 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 		RTE_ASSERT(sizeof lf_hdr->encaps_pkt_len <= UINT16_MAX);
 		if (unlikely((uint16_t)(sizeof lf_hdr->encaps_pkt_len) > UINT16_MAX - ipv4_total_length0)) {
 			// #if LOG_PACKETS
-			printf("[%d] Not yet implemented: LF packet too big to encapsualte.\n", lcore_id);
+			printf("[%d] Not yet implemented: LF packet too big to encapsulate.\n", lcore_id);
 			// #endif
 			return -1;
 		}
@@ -1132,6 +1168,11 @@ static void scionfwd_simple_forward(
 	ipv4_hdr0 = (struct rte_ipv4_hdr *)(ether_hdr0 + 1);
 
 	int r;
+#if UNIDIRECTIONAL_SETUP
+	(void)is_backend;
+	(void)handle_outbound_pkt;
+	r = handle_inbound_pkt(m, ether_hdr0, ipv4_hdr0, lcore_id, lvars, state);
+#else
 	if (is_backend(ipv4_hdr0->dst_addr)) {
 		r = handle_inbound_pkt(m, ether_hdr0, ipv4_hdr0, lcore_id, lvars, state);
 	} else if (is_backend(ipv4_hdr0->src_addr)) {
@@ -1139,6 +1180,7 @@ static void scionfwd_simple_forward(
 	} else {
 		goto drop_pkt;
 	}
+#endif
 	if (r != 0) {
 		RTE_ASSERT(r == -1);
 		goto drop_pkt;
@@ -2038,7 +2080,7 @@ static void key_manager_main_loop(void) {
 
 /*
  * this function initialises the rate-limiter and defines the initial buckets.
- * As described in the "LighningFilter" thesis we use a modified version of token bucket
+ * As described in the "LightningFilter" thesis we use a modified version of token bucket
  *
  * The code contains some boilerplate because we have to calculate rate limits both system-wide
  * and per-AS, for SecX and normal SCION traffic. Moreover, to avoid data races, we calculate the
@@ -2050,7 +2092,7 @@ static void init_dos(void) {
 	dos_statistic *dos_stat;
 	dos_counter *counter;
 
-	// reserve counters (have to be atomic becasue they are shared among all lcores)
+	// reserve counters (have to be atomic because they are shared among all lcores)
 	rte_atomic64_t *reserve_all_even = malloc(sizeof *reserve_all_even);
 	rte_atomic64_t *reserve_all_odd = malloc(sizeof *reserve_all_odd);
 
@@ -2058,7 +2100,7 @@ static void init_dos(void) {
 	current_pool[0] = 0;
 	current_pool[1] = 0;
 
-	// for each core initalize:
+	// for each core initialize:
 	for (int core_id = 0; core_id < RTE_MAX_LCORE; core_id++) {
 		if (is_in_use[core_id] == false) {
 			continue;
@@ -2070,7 +2112,7 @@ static void init_dos(void) {
 		previous_dos_stat[core_id].sc_dos_packet_count[0] = 0;
 		previous_dos_stat[core_id].sc_dos_packet_count[1] = 0;
 
-		// initalize the dictionaries
+		// initialize the dictionaries
 		dos_stat = &dos_stats[core_id];
 		dictionary_flow *dict_odd = dic_new_flow(initial_size);
 		dictionary_flow *dict_even = dic_new_flow(initial_size);
@@ -2168,7 +2210,7 @@ static void dos_main_loop(void) {
 
 	dos_stat = dos_stats[rte_lcore_id()];
 	dos_slice_period = rte_get_timer_hz() / 10000; // 100 micro-seconds
-	state = EVEN; // inital rate-limiter state: EVEN -> initial processing core state: ODD
+	state = EVEN; // initial rate-limiter state: EVEN -> initial processing core state: ODD
 
 	/* main loop */
 	while (!force_quit) {
@@ -2248,7 +2290,7 @@ static void dos_main_loop(void) {
 			secX_count = secX_count * (1.0 - RESERVE_FRACTION);
 			sc_count = sc_count * (1.0 - RESERVE_FRACTION);
 
-			// store how many tokens were allocated globaly
+			// store how many tokens were allocated globally
 			rte_atomic64_set((dos_stat.reserve[state]), reserve_count);
 			dos_stat.secX_dos_packet_count[state] = secX_count;
 			dos_stat.sc_dos_packet_count[state] = sc_count;
@@ -2679,7 +2721,7 @@ static int scionfwd_parse_args(int argc, char **argv) {
 
 /*
  * Initialize the memory pools used by all processing cores
- * If numa is on we initalize two pools, one per socket.
+ * If numa is on we initialize two pools, one per socket.
  * Otherwise we use only one pool
  * ! This currentyl works only on a machine with max two sockets !
  */
@@ -3359,7 +3401,7 @@ int main(int argc, char **argv) {
 	tsc_hz = rte_get_tsc_hz();
 #endif
 
-	// initalize the blooms filters
+	// initialize the blooms filters
 	printf("\nInitializing Bloom filters ...\n");
 	for (int i = 0; i < RTE_MAX_LCORE; i++) {
 		for (int j = 0; j < MAX_BLOOM_FILTERS; j++) {
