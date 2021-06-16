@@ -1155,6 +1155,7 @@ drop_pkt:
 
 static void scionfwd_simple_gw_forward(
 	struct rte_mbuf *m, const unsigned lcore_id, struct lcore_values *lvars, int16_t state) {
+	(void)lcore_id;
 	(void)state;
 
 	swap_eth_addrs(m);
@@ -1175,6 +1176,7 @@ static void scionfwd_simple_gw_forward(
 
 static void scionfwd_simple_l2_forward(
 	struct rte_mbuf *m, const unsigned lcore_id, struct lcore_values *lvars, int16_t state) {
+	(void)lcore_id;
 	(void)state;
 
 	struct rte_ether_hdr *l2_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
