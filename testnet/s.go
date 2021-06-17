@@ -13,7 +13,7 @@ import (
 	"github.com/scionproto/scion/go/lib/sock/reliable/reconnect"
 )
 
-func runServer(sciondAddr string, localAddr snet.UDPAddr, dataCallback func(data string)) {
+func runServer(sciondAddr, dispatcherSocket string, localAddr snet.UDPAddr, dataCallback func(data string)) {
 	var err error
 	ctx := context.Background()
 
@@ -22,7 +22,8 @@ func runServer(sciondAddr string, localAddr snet.UDPAddr, dataCallback func(data
 		log.Fatal("Failed to create SCION connector:", err)
 	}
 	pds := &snet.DefaultPacketDispatcherService{
-		Dispatcher: reconnect.NewDispatcherService(reliable.NewDispatcher("")),
+		Dispatcher: reconnect.NewDispatcherService(
+			reliable.NewDispatcher(dispatcherSocket)),
 		SCMPHandler: snet.DefaultSCMPHandler{
 			RevocationHandler: sciond.RevHandler{Connector: sdc},
 		},
@@ -53,15 +54,31 @@ func runServer(sciondAddr string, localAddr snet.UDPAddr, dataCallback func(data
 		if dataCallback != nil {
 			dataCallback(data)
 		}
+
+		pkt.Destination, pkt.Source = pkt.Source, pkt.Destination
+		pkt.Payload = snet.UDPPayload{
+			DstPort: pld.SrcPort,
+			SrcPort: pld.DstPort,
+			Payload: []byte("!DLROW ,OLLEh"),
+		}
+		if err := pkt.Path.Reverse(); err != nil {
+			log.Printf("Failed to reverse path: %v", err)
+			continue
+		}
+		if err := conn.WriteTo(&pkt, &lastHop); err != nil {
+			log.Printf("Failed to write packet: %v\n", err)
+		}
 	}
 }
 
 func main() {
 	var sciondAddr string
+	var dispatcherSocket string
 	var localAddr snet.UDPAddr
-	flag.StringVar(&sciondAddr, "sciond", "", "SCIOND address")
+	flag.StringVar(&sciondAddr, "sciond", "", "sciond address")
+	flag.StringVar(&dispatcherSocket, "dispatcher-socket", "", "dispatcher socket")
 	flag.Var(&localAddr, "local", "Local address")
 	flag.Parse()
 
-	runServer(sciondAddr, localAddr, nil)
+	runServer(sciondAddr, dispatcherSocket, localAddr, nil)
 }

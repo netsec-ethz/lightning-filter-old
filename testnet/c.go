@@ -80,8 +80,23 @@ func sendHello(sciondAddr string, localAddr snet.UDPAddr, remoteAddr snet.UDPAdd
 
 	err = conn.WriteTo(pkt, nextHop)
 	if err != nil {
-		log.Printf("[%d] Failed to write packet: %v\n", err)
+		log.Printf("Failed to write packet: %v\n", err)
+		return
 	}
+
+	var lastHop net.UDPAddr
+	err = conn.ReadFrom(pkt, &lastHop)
+	if err != nil {
+		log.Printf("Failed to read packet: %v\n", err)
+		return
+	}
+	pld, ok := pkt.Payload.(snet.UDPPayload)
+	if !ok {
+		log.Printf("Failed to read packet payload\n")
+		return
+	}
+	data := string(pld.Payload);
+	log.Printf("Received payload: \"%v\"\n", data)
 }
 
 func main() {

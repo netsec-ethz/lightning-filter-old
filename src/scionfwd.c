@@ -89,7 +89,7 @@
 
 /* defines */
 
-#define SIMPLE_L2_FORWARD 0
+#define SIMPLE_L2_FORWARD 1
 #define SIMPLE_GW_FORWARD 0
 
 #define ENABLE_KEY_MANAGEMENT 0
@@ -97,12 +97,12 @@
 #define ENFORCE_DUPLICATE_FILTER 0
 #define ENFORCE_LF_RATE_LIMIT_FILTER 1
 #define LOG_DELEGATION_SECRETS 0
-#define LOG_PACKETS 0
+#define LOG_PACKETS 1
 #define CHECK_PACKET_STRUCTURE 0
 
 // deployment
-#define UNIDIRECTIONAL_SETUP 1
-#define AWS_DEPLOYMENT 0
+#define UNIDIRECTIONAL_SETUP 0
+#define AWS_DEPLOYMENT 1
 
 // logging
 #define RTE_LOGTYPE_scionfwd RTE_LOGTYPE_USER1
@@ -3233,7 +3233,8 @@ int main(int argc, char **argv) {
 
 	/* initialize tx queues */
 	printf("start initializing tx queues\n\n");
-	for (port_id = 0; port_id < RTE_MAX_ETHPORTS; port_id++) {
+	for (int p = 0; p < RTE_MAX_ETHPORTS; p++) {
+    port_id = p == 0? 1: 0;
 		// we only care about tx ports
 		if (is_tx_bypass_port[port_id] == false && is_tx_firewall_port[port_id] == false) {
 			continue;

@@ -1,0 +1,12 @@
+[dispatcher]
+id = "dispatcher-eh"
+application_socket = "/run/shm/dispatcher/endhost.sock"
+socket_file_mode = "0777"
+
+[metrics]
+prometheus = "[10.248.3.1]:30441"
+
+[features]
+
+[log.console]
+level = "debug"
