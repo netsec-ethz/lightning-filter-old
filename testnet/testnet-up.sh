@@ -28,7 +28,8 @@ sudo ip netns exec far ip link set dev lo up
 sudo ip route add 10.248.2.0/24 dev one via 10.248.1.2
 sudo ip route add 10.248.3.0/24 dev one via 10.248.1.2
 
-sudo ip netns exec near ip route change 10.248.1.0/24 dev two via 10.248.1.1
 sudo ip netns exec near ip route add 10.248.3.0/24 dev three via 10.248.2.2
-
 sudo ip netns exec far ip route add 10.248.1.0/24 dev four via 10.248.2.1
+
+sudo ip netns exec near ip route change 10.248.1.0/24 dev two via 10.248.1.1
+sudo ip netns exec near ip route change 10.248.2.0/24 dev three via 10.248.2.2
