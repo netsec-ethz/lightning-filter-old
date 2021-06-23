@@ -14,7 +14,7 @@ import (
 	"github.com/scionproto/scion/go/lib/topology/underlay"
 )
 
-func sendHello(sciondAddr string, localAddr snet.UDPAddr, remoteAddr snet.UDPAddr) {
+func sendHello(sciondAddr, dispatcherSocket string, localAddr snet.UDPAddr, remoteAddr snet.UDPAddr) {
 	var err error
 	ctx := context.Background()
 
@@ -23,7 +23,8 @@ func sendHello(sciondAddr string, localAddr snet.UDPAddr, remoteAddr snet.UDPAdd
 		log.Fatal("Failed to create SCION connector:", err)
 	}
 	pds := &snet.DefaultPacketDispatcherService{
-		Dispatcher: reconnect.NewDispatcherService(reliable.NewDispatcher("")),
+		Dispatcher: reconnect.NewDispatcherService(
+			reliable.NewDispatcher(dispatcherSocket)),
 		SCMPHandler: snet.DefaultSCMPHandler{
 			RevocationHandler: sciond.RevHandler{Connector: sdc},
 		},
@@ -101,12 +102,14 @@ func sendHello(sciondAddr string, localAddr snet.UDPAddr, remoteAddr snet.UDPAdd
 
 func main() {
 	var sciondAddr string
+	var dispatcherSocket string
 	var localAddr snet.UDPAddr
 	var remoteAddr snet.UDPAddr
 	flag.StringVar(&sciondAddr, "sciond", "", "SCIOND address")
+	flag.StringVar(&dispatcherSocket, "dispatcher-socket", "", "dispatcher socket")
 	flag.Var(&localAddr, "local", "Local address")
 	flag.Var(&remoteAddr, "remote", "Remote address")
 	flag.Parse()
 
-	sendHello(sciondAddr, localAddr, remoteAddr)
+	sendHello(sciondAddr, dispatcherSocket, localAddr, remoteAddr)
 }

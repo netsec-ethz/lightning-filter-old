@@ -6,7 +6,7 @@
     "voting"
   ],
   "isd_as": "1-ff00:0:110",
-  "mtu": 1400,
+  "mtu": 1280,
   "control_service": {
     "cs1-ff00_0_110-1": {
       "addr": "127.0.0.11:31000"
@@ -46,7 +46,7 @@
           "bandwidth": 500,
           "isd_as": "1-ff00:0:112",
           "link_to": "CHILD",
-          "mtu": 1472
+          "mtu": 1280
         }
       }
     }

@@ -1236,7 +1236,7 @@ static void scionfwd_simple_l2_forward(
 			(void)rte_memcpy(&l2_hdr->d_addr, &b.ether_addr, sizeof l2_hdr->d_addr);
 
 			#if LOG_PACKETS
-				printf("[%d] Forwarding outgoing packet:\n", lcore_id);
+				printf("[%d] Forwarding incoming packet:\n", lcore_id);
 				dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
 			#endif
 			uint16_t n = rte_eth_tx_buffer(

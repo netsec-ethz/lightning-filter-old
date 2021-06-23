@@ -1,7 +1,7 @@
 {
   "attributes": [],
   "isd_as": "1-ff00:0:111",
-  "mtu": 1472,
+  "mtu": 1280,
   "control_service": {
     "cs1-ff00_0_111-1": {
       "addr": "10.248.1.1:31010"
@@ -17,7 +17,7 @@
       "ctrl_addr": "10.248.1.1:31012",
       "internal_addr": "10.248.1.1:31014",
       "interfaces": {
-        "41": {
+        "1": {
           "underlay": {
             "public": "127.0.0.5:50000",
             "remote": "127.0.0.4:50000"

@@ -1,6 +1,6 @@
 [dispatcher]
-id = "dispatcher-eh"
-application_socket = "/run/shm/dispatcher/endhost.sock"
+id = "dispatcher1-ff00_0_111-eh"
+application_socket = "/run/shm/dispatcher/endhost1-ff00_0_111.sock"
 socket_file_mode = "0777"
 
 [metrics]
