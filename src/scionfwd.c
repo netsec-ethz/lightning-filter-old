@@ -339,6 +339,8 @@ int64_t current_pool[2];
 
 /* system configuration */
 
+static char scionfwd_config[256] = { '\0' };
+
 // mask of receiving ports
 static uint32_t scionfwd_rx_port_mask = 0;
 
@@ -359,15 +361,8 @@ static uint64_t MAX_POOL_SIZE_FACTOR = 5; /* max allowd pool size (determines ma
 static double RESERVE_FRACTION =
 	0.03; /* fraction of rate-limit allocation stored in shared reserve */
 
-// MAC updating enabled by default
-// (deprecated)
-static int mac_updating = 0;
-
 // NUMA allocation enabled by default
 static int numa_on = 0;
-
-// interactive CLI disabled by default
-static int is_interactive;
 
 // Configuration loaded from config file
 static struct lf_config config;
@@ -532,10 +527,10 @@ static struct delegation_secret *get_delegation_secret(struct key_store_node *n,
 	return ds;
 }
 
-static void compute_lf_chksum(const unsigned lcore_id, unsigned char drkey[BLOCK_SIZE], rte_be32_t src_addr,
-	rte_be32_t dst_addr, void *data, size_t data_len, unsigned char chksum[BLOCK_SIZE],
-	unsigned char rkey_buf[10 * BLOCK_SIZE], unsigned char addr_buf[32]) {
-
+static void compute_lf_chksum(const unsigned lcore_id, unsigned char drkey[BLOCK_SIZE],
+	rte_be32_t src_addr, rte_be32_t dst_addr, void *data, size_t data_len,
+	unsigned char chksum[BLOCK_SIZE], unsigned char rkey_buf[10 * BLOCK_SIZE],
+	unsigned char addr_buf[32]) {
 	RTE_ASSERT(data_len % BLOCK_SIZE == 0);
 	RTE_ASSERT(data_len <= INT_MAX);
 	(void)memset(addr_buf, 0, 32);
@@ -611,18 +606,18 @@ static void scionfwd_simple_scion_forward(
 			(void)rte_memcpy(&l2_hdr->s_addr, &tx_ether_addr, sizeof l2_hdr->s_addr);
 			(void)rte_memcpy(&l2_hdr->d_addr, &b.ether_addr, sizeof l2_hdr->d_addr);
 
-			#if LOG_PACKETS
-				printf("[%d] @@@ Forwarding incoming packet:\n", lcore_id);
-				dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
-			#endif
+#if LOG_PACKETS
+			printf("[%d] @@@ Forwarding incoming packet:\n", lcore_id);
+			dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
+#endif
 			uint16_t n = rte_eth_tx_buffer(
 				lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
 			(void)n;
-			#if LOG_PACKETS
+#if LOG_PACKETS
 			if (n > 0) {
 				printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
 			}
-			#endif
+#endif
 			return;
 		}
 		r = find_backend(l3_hdr->src_addr, &b);
@@ -655,20 +650,20 @@ static void scionfwd_simple_scion_forward(
 					return;
 				}
 
-				// uint16_t spoa_hdr_len = 
+				// uint16_t spoa_hdr_len =
 
-				#if LOG_PACKETS
-					printf("[%d] ### Forwarding outgoing packet:\n", lcore_id);
-					dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
-				#endif
+#if LOG_PACKETS
+				printf("[%d] ### Forwarding outgoing packet:\n", lcore_id);
+				dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
+#endif
 				uint16_t n = rte_eth_tx_buffer(
 					lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
 				(void)n;
-				#if LOG_PACKETS
+#if LOG_PACKETS
 				if (n > 0) {
 					printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
 				}
-				#endif
+#endif
 				return;
 			}
 		}
@@ -859,7 +854,8 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 			}
 			if (unlikely(
 						!is_chksum_valid && (t_now - ds->validity_not_before < max_key_validity_extension))) {
-				// the current delegation secret is not valid yet -> try again with the previous delegation secret
+				// the current delegation secret is not valid yet -> try again with the previous delegation
+				// secret
 				ds = &n->key_store->delegation_secrets[PREV_KEY_INDEX(n->key_index)];
 				if (ds->validity_not_before < ds->validity_not_after) {
 #if LOG_PACKETS
@@ -1288,18 +1284,18 @@ static void scionfwd_simple_gw_forward(
 
 	swap_eth_addrs(m);
 
-	#if LOG_PACKETS
+#if LOG_PACKETS
 	printf("[%d] Forwarding outgoing packet:\n", lcore_id);
 	dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
-	#endif
+#endif
 	uint16_t n = rte_eth_tx_buffer(
 		lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
 	(void)n;
-	#if LOG_PACKETS
+#if LOG_PACKETS
 	if (n > 0) {
 		printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
 	}
-	#endif
+#endif
 }
 
 static void scionfwd_simple_l2_forward(
@@ -1321,18 +1317,18 @@ static void scionfwd_simple_l2_forward(
 			(void)rte_memcpy(&l2_hdr->s_addr, &tx_ether_addr, sizeof l2_hdr->s_addr);
 			(void)rte_memcpy(&l2_hdr->d_addr, &b.ether_addr, sizeof l2_hdr->d_addr);
 
-			#if LOG_PACKETS
-				printf("[%d] Forwarding incoming packet:\n", lcore_id);
-				dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
-			#endif
+#if LOG_PACKETS
+			printf("[%d] Forwarding incoming packet:\n", lcore_id);
+			dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
+#endif
 			uint16_t n = rte_eth_tx_buffer(
 				lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
 			(void)n;
-			#if LOG_PACKETS
+#if LOG_PACKETS
 			if (n > 0) {
 				printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
 			}
-			#endif
+#endif
 			return;
 		}
 		r = find_backend(l3_hdr->src_addr, &b);
@@ -1346,18 +1342,18 @@ static void scionfwd_simple_l2_forward(
 				(void)rte_memcpy(&l2_hdr->s_addr, &tx_ether_addr, sizeof l2_hdr->s_addr);
 				(void)rte_memcpy(&l2_hdr->d_addr, &p.ether_addr, sizeof l2_hdr->d_addr);
 
-				#if LOG_PACKETS
-					printf("[%d] Forwarding outgoing packet:\n", lcore_id);
-					dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
-				#endif
+#if LOG_PACKETS
+				printf("[%d] Forwarding outgoing packet:\n", lcore_id);
+				dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
+#endif
 				uint16_t n = rte_eth_tx_buffer(
 					lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
 				(void)n;
-				#if LOG_PACKETS
+#if LOG_PACKETS
 				if (n > 0) {
 					printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
 				}
-				#endif
+#endif
 				return;
 			}
 		}
@@ -2520,23 +2516,15 @@ static int load_config(const char *path) {
 	 * divided by 1.042 (Magic constant, I don't no why but without the rate-limits are too high)
 	 */
 	config.system_limit = (uint64_t)((config.system_limit / 8) / 10000)
-		/ 1.042; // convert limit to bytes and shrink to 100 microseconds interval
+												/ 1.042; // convert limit to bytes and shrink to 100 microseconds interval
 	struct lf_config_peer *p = config.peers;
 	while (p != NULL) {
 		p->rate_limit = (uint64_t)((p->rate_limit / 8) / 10000)
-			/ 1.042; // convert limit to bytes and shrink to 100 microseconds interval
+										/ 1.042; // convert limit to bytes and shrink to 100 microseconds interval
 		p = p->next;
 	}
 
 	return 0;
-}
-
-/* display CLI usage */
-static void print_cli_usage(void) {
-	printf(
-		"Currently supported CLI commands:\n\n"
-		"    stop  terminates the application\n"
-		"    help  Prints this info\n\n");
 }
 
 /*
@@ -2545,34 +2533,6 @@ static void print_cli_usage(void) {
  * can not react to ctrl+c, so user has to call stop command if
  * CL is enabled
  */
-static int cli_read_line(void) {
-	int res;
-	char *line = NULL;
-	size_t bufsize = 0;
-	res = getline(&line, &bufsize, stdin);
-	if (res < 0) {
-		return 1;
-	}
-	if (strcmp(line, "stop\n") == 0) {
-		force_quit = true;
-		return 0;
-	} else {
-		print_cli_usage();
-	}
-	return 1;
-}
-
-/*
- * CLI prompt user for imput and parse the input
- */
-static void prompt(void) {
-	int status;
-
-	do {
-		printf("> ");
-		status = cli_read_line();
-	} while (status);
-}
 
 static int scionfwd_launch_fwd_core(void *arg) {
 	(void)arg;
@@ -2604,12 +2564,6 @@ static int scionfwd_launch_key_manager_core(void *arg) {
 static int scionfwd_launch_supervisor(void) {
 	printf("SUPERVISOR HAS STARTED\n");
 	while (!force_quit) {
-		if (is_interactive) {
-			printf("\n\n");
-			printf("COMMAND LINE RUNNING\n");
-			printf("********************\n");
-			prompt();
-		}
 		sleep(1);
 	}
 	printf("SUPERVISOR HAS TERMINATED\n");
@@ -2668,43 +2622,17 @@ static int scionfwd_parse_timer_period(const char *q_arg) {
 /* command line arg requirement: define short option flags */
 static const char short_options[] =
 	"r:" /* receive portmask */
-	"t:" /* transmit portmask */
 	"x:" /* transmit bypass portmask */
 	"y:" /* transmit firewall portmask */
 	"n" /* enable NUMA alloc */
 	"i" /* enable interactive */
-	"l" /* load from config */
 	"S:" /* slice timer period */
 	"E:" /* bloom entries */
 	"R:" /* bloom error rate */
 	"D:" /* bloom interval */
 	"K:" /* key grace period */
+	"C:" /* config file */
 	;
-
-/* all this is deprecated I think */
-#define CMD_LINE_OPT_CONFIG "config"
-#define CMD_LINE_OPT_ETH_DEST "eth-dest"
-#define CMD_LINE_OPT_MAC_UPDATING "mac-updating"
-#define CMD_LINE_OPT_NO_MAC_UPDATING "no-mac-updating"
-
-enum {
-	/* long options mapped to a short option */
-
-	/* first long only option value must be >= 256, so that we won't
-	 * conflict with short options */
-	CMD_LINE_OPT_MIN_NUM = 256,
-	CMD_LINE_OPT_CONFIG_NUM,
-	CMD_LINE_OPT_ETH_DEST_NUM,
-
-};
-
-/* again I think the long options are deprecated,
- * the did not work when I took over this project */
-static const struct option long_options[] = { { CMD_LINE_OPT_CONFIG, 1, 0,
-																								CMD_LINE_OPT_CONFIG_NUM },
-	{ CMD_LINE_OPT_ETH_DEST, 1, 0, CMD_LINE_OPT_ETH_DEST_NUM },
-	{ CMD_LINE_OPT_MAC_UPDATING, no_argument, &mac_updating, 1 },
-	{ CMD_LINE_OPT_NO_MAC_UPDATING, no_argument, &mac_updating, 0 }, { NULL, 0, 0, 0 } };
 
 /*
  * This expression is used to calculate the number of mbufs needed
@@ -2731,7 +2659,7 @@ static int scionfwd_parse_args(int argc, char **argv) {
 	optopt = 0;
 	opterr = 0;
 
-	while ((opt = getopt_long(argc, argv, short_options, long_options, NULL)) != -1) {
+	while ((opt = getopt(argc, argv, short_options)) != -1) {
 		switch (opt) {
 			/* receiving ports */
 			case 'r':
@@ -2756,11 +2684,6 @@ static int scionfwd_parse_args(int argc, char **argv) {
 			/* firewall ports */
 			case 'y':
 				scionfwd_tx_firewall_port_mask = scionfwd_parse_portmask(optarg);
-				break;
-
-			/* enable interactive mode */
-			case 'i':
-				is_interactive = 1;
 				break;
 
 			/* enable numa alloc */
@@ -2795,6 +2718,14 @@ static int scionfwd_parse_args(int argc, char **argv) {
 
 			case 'D':
 				delta_us = scionfwd_parse_timer_period(optarg);
+				break;
+
+			case 'C':
+				if (strlen(optarg) >= sizeof scionfwd_config) {
+					scionfwd_usage(prgname);
+					return -1;
+				}
+				(void)strcpy(scionfwd_config, optarg);
 				break;
 
 			case 0:
@@ -2958,7 +2889,6 @@ int main(int argc, char **argv) {
 
 	// set default values for two system configs
 	max_key_validity_extension = DEFAULT_KEY_VALIDITY_EXTENSION;
-	is_interactive = 0;
 
 	printf("Starting SCION FW BYPASS\n\n");
 
@@ -2987,7 +2917,11 @@ int main(int argc, char **argv) {
 		rte_exit(EXIT_FAILURE, "No Ethernet ports - bye\n");
 
 	// read rate-limit config file
-	int r = load_config("config/end_hosts.cfg");
+	if (scionfwd_config[0] == '\0') {
+		RTE_ASSERT(sizeof "config/end_hosts.cfg" <= sizeof scionfwd_config);
+		(void)strcpy(scionfwd_config, "config/end_hosts.cfg");
+	}
+	int r = load_config(scionfwd_config);
 	if (r < 0) {
 		rte_exit(EXIT_FAILURE, "Could not load config from provided file\n");
 	}
@@ -3329,9 +3263,9 @@ int main(int argc, char **argv) {
 	printf("start initializing tx queues\n\n");
 	for (int p = 0; p < RTE_MAX_ETHPORTS; p++) {
 #if SIMPLE_L2_FORWARD || SIMPLE_SCION_FORWARD
-    port_id = p == 0? 1: 0;
+		port_id = p == 0 ? 1 : 0;
 #else
-    port_id = p;
+		port_id = p;
 #endif
 
 		// we only care about tx ports
