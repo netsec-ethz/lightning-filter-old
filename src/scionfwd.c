@@ -99,7 +99,7 @@
 #define ENFORCE_LF_RATE_LIMIT_FILTER 1
 #define LOG_DELEGATION_SECRETS 0
 #define LOG_PACKETS 1
-#define CHECK_PACKET_STRUCTURE 0
+#define CHECK_PACKET_STRUCTURE 1
 
 // deployment
 #define UNIDIRECTIONAL_SETUP 0
@@ -107,6 +107,13 @@
 
 // logging
 #define RTE_LOGTYPE_scionfwd RTE_LOGTYPE_USER1
+
+// SCION Default Port Ranges
+// See https://github.com/scionproto/scion/wiki/Default-port-ranges
+#define SCION_BR_DEFAULT_PORT_LO 30042
+#define SCION_BR_DEFAULT_PORT_HI 30051
+#define SCION_BR_TESTNET_PORT_0 31014
+#define SCION_BR_TESTNET_PORT_1 31020
 
 // Lightning Filter Port
 #define LF_DEFAULT_PORT 49149
@@ -154,6 +161,20 @@ static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
 // Cryptography related constants
 #define BLOCK_SIZE 16
 #define IV_SIZE 16
+
+/**
+ * SCION Headers
+ */
+
+struct scion_cmn_hdr {
+	uint8_t version_qos_flowid[4];
+	uint8_t next_hdr;
+	uint8_t hdr_len;
+	uint16_t payload_len;
+	uint8_t path_type;
+	uint8_t dt_dl_st_sl;
+	uint16_t rsv;
+} __attribute__((__packed__));
 
 /**
  * LF Header
@@ -595,19 +616,185 @@ static void scionfwd_simple_scion_forward(
 	struct rte_ether_hdr *l2_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 	uint16_t ether_type = l2_hdr->ether_type;
 
-	if (ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
-		struct rte_ipv4_hdr *l3_hdr = (struct rte_ipv4_hdr *)(l2_hdr + 1);
-		struct lf_config_backend b;
-		int r = find_backend(l3_hdr->dst_addr, &b);
+	if (ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
+		rte_pktmbuf_free(m);
+		return;
+	}
+
+	struct rte_ipv4_hdr *l3_hdr = (struct rte_ipv4_hdr *)(l2_hdr + 1);
+	struct lf_config_backend b;
+	int r = find_backend(l3_hdr->dst_addr, &b);
+	if (r) {
+		struct rte_ether_addr tx_ether_addr;
+		rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
+
+		(void)rte_memcpy(&l2_hdr->s_addr, &tx_ether_addr, sizeof l2_hdr->s_addr);
+		(void)rte_memcpy(&l2_hdr->d_addr, &b.ether_addr, sizeof l2_hdr->d_addr);
+
+#if LOG_PACKETS
+		printf("[%d] @@@ Forwarding incoming packet:\n", lcore_id);
+		dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
+#endif
+		uint16_t n = rte_eth_tx_buffer(
+			lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
+		(void)n;
+#if LOG_PACKETS
+		if (n > 0) {
+			printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
+		}
+#endif
+		return;
+	}
+	r = find_backend(l3_hdr->src_addr, &b);
+	if (r) {
+		struct lf_config_peer p;
+		r = find_peer(l3_hdr->dst_addr, &p);
 		if (r) {
 			struct rte_ether_addr tx_ether_addr;
 			rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
 
 			(void)rte_memcpy(&l2_hdr->s_addr, &tx_ether_addr, sizeof l2_hdr->s_addr);
-			(void)rte_memcpy(&l2_hdr->d_addr, &b.ether_addr, sizeof l2_hdr->d_addr);
+			(void)rte_memcpy(&l2_hdr->d_addr, &p.ether_addr, sizeof l2_hdr->d_addr);
+
+			RTE_ASSERT(is_backend(l3_hdr->src_addr));
+
+			/* handle_outbound_pkt */
+
+			struct rte_ether_hdr *ether_hdr0 = l2_hdr;
+
+			RTE_ASSERT(sizeof *ether_hdr0 <= m->data_len);
+
+			if (ether_hdr0->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
+				struct rte_ipv4_hdr *ipv4_hdr0;
+#if CHECK_PACKET_STRUCTURE
+				if (unlikely(sizeof *ipv4_hdr0 > m->data_len - sizeof *ether_hdr0)) {
+					// #if LOG_PACKETS
+					printf("[%d] Unsupported packet: IP header exceeds first buffer segment.\n", lcore_id);
+					// #endif
+					rte_pktmbuf_free(m);
+					return;
+				}
+#endif
+				ipv4_hdr0 = (struct rte_ipv4_hdr *)(ether_hdr0 + 1);
+
+				if (ipv4_hdr0->next_proto_id == IP_PROTO_ID_UDP) {
+					uint16_t ipv4_hdr_length0 =
+						(ipv4_hdr0->version_ihl & RTE_IPV4_HDR_IHL_MASK) * RTE_IPV4_IHL_MULTIPLIER;
+
+					uint16_t ipv4_total_length0 = rte_be_to_cpu_16(ipv4_hdr0->total_length);
+
+#if CHECK_PACKET_STRUCTURE
+					if (unlikely(ipv4_hdr_length0 < sizeof *ipv4_hdr0)) {
+						// #if LOG_PACKETS
+						printf("[%d] Invalid IP packet: header length too small.\n", lcore_id);
+						// #endif
+						rte_pktmbuf_free(m);
+						return;
+					}
+#endif
+#if CHECK_PACKET_STRUCTURE
+					if (unlikely(ipv4_total_length0 != m->data_len - sizeof *ether_hdr0)) {
+						// #if LOG_PACKETS
+						printf(
+							"[%d] Not yet implemented: IP packet length does not match with first buffer segment "
+							"length.\n",
+							lcore_id);
+						// #endif
+						/* drop packet */
+						rte_pktmbuf_free(m);
+						return;
+					}
+#endif
+
+					uint16_t ipv4_data_length0 = ipv4_total_length0 - ipv4_hdr_length0;
+
+					struct rte_udp_hdr *udp_hdr;
+#if CHECK_PACKET_STRUCTURE
+					if (unlikely(sizeof *udp_hdr > m->data_len - sizeof *ether_hdr0 - ipv4_hdr_length0)) {
+						// #if LOG_PACKETS
+						printf("[%d] Not yet implemented: UDP header exceeds first buffer segment.\n", lcore_id);
+						// #endif
+						rte_pktmbuf_free(m);
+						return;
+					}
+#endif
+					udp_hdr = (struct rte_udp_hdr *)((char *)ipv4_hdr0 + ipv4_hdr_length0);
+
+					uint16_t udp_dst_port = rte_be_to_cpu_16(udp_hdr->dst_port);
+					if (((SCION_BR_DEFAULT_PORT_LO <= udp_dst_port) && (udp_dst_port <= SCION_BR_DEFAULT_PORT_HI))
+						|| (udp_dst_port == SCION_BR_TESTNET_PORT_0) || (udp_dst_port == SCION_BR_TESTNET_PORT_1))
+					{
+						uint16_t udp_dgram_length0 = rte_be_to_cpu_16(udp_hdr->dgram_len);
+#if CHECK_PACKET_STRUCTURE
+						if (unlikely(udp_dgram_length0 != ipv4_data_length0)) {
+							// #if LOG_PACKETS
+							printf("[%d] Invalid IP packet: total length inconsistent with UDP datagram length.\n",
+								lcore_id);
+							// #endif
+							rte_pktmbuf_free(m);
+							return;
+						}
+#endif
+#if CHECK_PACKET_STRUCTURE
+						if (unlikely(udp_dgram_length0 < sizeof *udp_hdr)) {
+							// #if LOG_PACKETS
+							printf("[%d] Invalid UDP packet: datagram length smaller than header length.\n", lcore_id);
+							// #endif
+							rte_pktmbuf_free(m);
+							return;
+						}
+#endif
+
+						uint16_t udp_data_length0 = udp_dgram_length0 - sizeof *udp_hdr;
+
+						struct scion_cmn_hdr *scion_cmn_hdr;
+#if CHECK_PACKET_STRUCTURE
+						if (unlikely(sizeof *scion_cmn_hdr > udp_data_length0)) {
+							// #if LOG_PACKETS
+							printf("[%d] Invalid SCION packet: header exceeds datagram length.\n", lcore_id);
+							// #endif
+							rte_pktmbuf_free(m);
+							return;
+						}
+#endif
+						scion_cmn_hdr = (struct scion_cmn_hdr *)(udp_hdr + 1);
+
+						if (scion_cmn_hdr->version_qos_flowid[0] >> 4 == 0) {
+							uint16_t scion_cmn_hdr_len0 = scion_cmn_hdr->hdr_len * 4;
+	
+#if CHECK_PACKET_STRUCTURE
+							if (unlikely(scion_cmn_hdr_len0 > udp_data_length0)) {
+								// #if LOG_PACKETS
+								printf("[%d] Invalid SCION packet: header length inconsistent with UDP datagram length.\n",
+									lcore_id);
+								// #endif
+								rte_pktmbuf_free(m);
+								return;
+							}
+#endif
+							
+							uint16_t scion_payload_len0 = rte_be_to_cpu_16(scion_cmn_hdr->payload_len);
+
+#if CHECK_PACKET_STRUCTURE
+							if (unlikely(scion_payload_len0 != udp_data_length0 - scion_cmn_hdr_len0)) {
+								// #if LOG_PACKETS
+								printf("[%d] Invalid SCION packet: payload length inconsistent with UDP datagram length.\n",
+									lcore_id);
+								// #endif
+								rte_pktmbuf_free(m);
+								return;
+							}
+#endif
+
+printf("@@@SCION next_hdr: %d\n", scion_cmn_hdr->next_hdr);
+
+						}
+					}
+				}
+			}
 
 #if LOG_PACKETS
-			printf("[%d] @@@ Forwarding incoming packet:\n", lcore_id);
+			printf("[%d] ### Forwarding outgoing packet:\n", lcore_id);
 			dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
 #endif
 			uint16_t n = rte_eth_tx_buffer(
@@ -619,53 +806,6 @@ static void scionfwd_simple_scion_forward(
 			}
 #endif
 			return;
-		}
-		r = find_backend(l3_hdr->src_addr, &b);
-		if (r) {
-			struct lf_config_peer p;
-			r = find_peer(l3_hdr->dst_addr, &p);
-			if (r) {
-				struct rte_ether_addr tx_ether_addr;
-				rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
-
-				(void)rte_memcpy(&l2_hdr->s_addr, &tx_ether_addr, sizeof l2_hdr->s_addr);
-				(void)rte_memcpy(&l2_hdr->d_addr, &p.ether_addr, sizeof l2_hdr->d_addr);
-
-				struct rte_ether_hdr *ether_hdr0 = l2_hdr;
-				struct rte_ipv4_hdr *ipv4_hdr0 = l3_hdr;
-
-				RTE_ASSERT(is_peer(ipv4_hdr0->dst_addr));
-
-				uint16_t ipv4_total_length0 = rte_be_to_cpu_16(ipv4_hdr0->total_length);
-
-				if (unlikely(ipv4_total_length0 != m->data_len - sizeof *ether_hdr0)) {
-					// #if LOG_PACKETS
-					printf(
-						"[%d] Not yet implemented: IP packet length does not match with first buffer segment "
-						"length.\n",
-						lcore_id);
-					// #endif
-					/* drop packet */
-					rte_pktmbuf_free(m);
-					return;
-				}
-
-				// uint16_t spoa_hdr_len =
-
-#if LOG_PACKETS
-				printf("[%d] ### Forwarding outgoing packet:\n", lcore_id);
-				dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
-#endif
-				uint16_t n = rte_eth_tx_buffer(
-					lvars->tx_bypass_port_id, lvars->tx_bypass_queue_id, lvars->tx_bypass_buffer, m);
-				(void)n;
-#if LOG_PACKETS
-				if (n > 0) {
-					printf("[%d] Flushed packets to TX port: %d\n", lcore_id, n);
-				}
-#endif
-				return;
-			}
 		}
 	}
 	/* drop packet */
@@ -758,7 +898,7 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 #if CHECK_PACKET_STRUCTURE
 			if (unlikely(sizeof *lf_hdr > udp_dgram_length - sizeof *udp_hdr)) {
 				// #if LOG_PACKETS
-				printf("[%d] Invalid LF packet: LF header exceeds datagram length.\n", lcore_id);
+				printf("[%d] Invalid LF packet: header exceeds datagram length.\n", lcore_id);
 				// #endif
 				return -1;
 			}
