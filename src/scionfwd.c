@@ -339,7 +339,7 @@ int64_t current_pool[2];
 
 /* system configuration */
 
-static char scionfwd_config[256] = { '\0' };
+static char scionfwd_config[PATH_MAX] = "config/end_hosts.cfg";
 
 // mask of receiving ports
 static uint32_t scionfwd_rx_port_mask = 0;
@@ -2917,10 +2917,6 @@ int main(int argc, char **argv) {
 		rte_exit(EXIT_FAILURE, "No Ethernet ports - bye\n");
 
 	// read rate-limit config file
-	if (scionfwd_config[0] == '\0') {
-		RTE_ASSERT(sizeof "config/end_hosts.cfg" <= sizeof scionfwd_config);
-		(void)strcpy(scionfwd_config, "config/end_hosts.cfg");
-	}
 	int r = load_config(scionfwd_config);
 	if (r < 0) {
 		rte_exit(EXIT_FAILURE, "Could not load config from provided file\n");
