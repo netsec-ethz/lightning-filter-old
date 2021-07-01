@@ -166,6 +166,9 @@ static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
  * SCION Headers
  */
 
+#define SCION_PROTOCOL_HBH 200
+#define SCION_PROTOCOL_E2E 201
+
 struct scion_cmn_hdr {
 	uint8_t version_qos_flowid[4];
 	uint8_t next_hdr;
@@ -174,6 +177,11 @@ struct scion_cmn_hdr {
 	uint8_t path_type;
 	uint8_t dt_dl_st_sl;
 	uint16_t rsv;
+} __attribute__((__packed__));
+
+struct scion_ext_hdr {
+	uint8_t next_hdr;
+	uint8_t ext_len;
 } __attribute__((__packed__));
 
 /**
@@ -786,8 +794,71 @@ static void scionfwd_simple_scion_forward(
 							}
 #endif
 
-printf("@@@SCION next_hdr: %d\n", scion_cmn_hdr->next_hdr);
+							uint8_t next_hdr = scion_cmn_hdr->next_hdr;
 
+							struct scion_ext_hdr *scion_ext_hdr;
+							scion_ext_hdr = (struct scion_ext_hdr *)((char *)scion_cmn_hdr + scion_cmn_hdr_len0);
+
+							if (unlikely(next_hdr == SCION_PROTOCOL_HBH)) {
+#if CHECK_PACKET_STRUCTURE
+								if (unlikely(sizeof *scion_ext_hdr > scion_payload_len0)) {
+									// #if LOG_PACKETS
+									printf("[%d] Invalid SCION packet: payload length inconsistent with minimum HBH header length.\n", lcore_id);
+									// #endif
+									rte_pktmbuf_free(m);
+									return;
+								}
+#endif
+
+								uint16_t ext_len = scion_ext_hdr->ext_len * 4;
+
+#if CHECK_PACKET_STRUCTURE
+								if (unlikely(sizeof *scion_ext_hdr > ext_len)) {
+									// #if LOG_PACKETS
+									printf("[%d] Invalid SCION packet: HBH header length inconsistent with minimum HBH header length.\n", lcore_id);
+									// #endif
+									rte_pktmbuf_free(m);
+									return;
+								}
+#endif
+#if CHECK_PACKET_STRUCTURE
+								if (unlikely(ext_len > scion_payload_len0)) {
+									// #if LOG_PACKETS
+									printf("[%d] Invalid SCION packet: payload length inconsistent with HBH header length.\n", lcore_id);
+									// #endif
+									rte_pktmbuf_free(m);
+									return;
+								}
+#endif
+								
+								next_hdr = scion_ext_hdr->next_hdr;
+
+								scion_ext_hdr = (struct scion_ext_hdr *)((char *)scion_ext_hdr + ext_len);
+							}
+
+							if (unlikely(next_hdr == SCION_PROTOCOL_E2E)) {
+								// #if LOG_PACKETS
+								printf("[%d] Not yet implemented: SCION packet already contains E@E header.\n", lcore_id);
+								// #endif
+								rte_pktmbuf_free(m);
+								return;
+							}
+
+							uint16_t ext_len = 24;
+
+							char *p = rte_pktmbuf_prepend(m, ext_len);
+							RTE_ASSERT(p != NULL);
+
+							size_t d = (char *)scion_ext_hdr - (char *)ether_hdr0;
+
+printf("@@@d = %zu\n", d);
+							rte_memcpy((char *)ether_hdr0 - ext_len, ether_hdr0, d);
+
+							scion_cmn_hdr = (struct scion_cmn_hdr *)((char *)scion_cmn_hdr - ext_len);
+							scion_ext_hdr = (struct scion_ext_hdr *)((char *)scion_ext_hdr - ext_len);
+							memset(scion_ext_hdr, 0, ext_len);
+							scion_ext_hdr->next_hdr = scion_cmn_hdr->next_hdr;
+							scion_ext_hdr->ext_len = ext_len / 4;
 						}
 					}
 				}
