@@ -800,6 +800,12 @@ static void scionfwd_simple_scion_forward(
 							scion_ext_hdr = (struct scion_ext_hdr *)((char *)scion_cmn_hdr + scion_cmn_hdr_len0);
 
 							if (unlikely(next_hdr == SCION_PROTOCOL_HBH)) {
+								// #if LOG_PACKETS
+								printf("[%d] Not yet implemented: SCION packet contains HBH header.\n", lcore_id);
+								// #endif
+								rte_pktmbuf_free(m);
+								return;
+
 #if CHECK_PACKET_STRUCTURE
 								if (unlikely(sizeof *scion_ext_hdr > scion_payload_len0)) {
 									// #if LOG_PACKETS
@@ -838,7 +844,7 @@ static void scionfwd_simple_scion_forward(
 
 							if (unlikely(next_hdr == SCION_PROTOCOL_E2E)) {
 								// #if LOG_PACKETS
-								printf("[%d] Not yet implemented: SCION packet already contains E@E header.\n", lcore_id);
+								printf("[%d] Not yet implemented: SCION packet already contains E2E header.\n", lcore_id);
 								// #endif
 								rte_pktmbuf_free(m);
 								return;
@@ -851,14 +857,29 @@ static void scionfwd_simple_scion_forward(
 
 							size_t d = (char *)scion_ext_hdr - (char *)ether_hdr0;
 
-printf("@@@d = %zu\n", d);
 							rte_memcpy((char *)ether_hdr0 - ext_len, ether_hdr0, d);
 
+							ether_hdr0 = (struct rte_ether_hdr *)((char *)ether_hdr0 - ext_len);
+							ipv4_hdr0 = (struct rte_ipv4_hdr *)((char *)ipv4_hdr0 - ext_len);
+							udp_hdr = (struct rte_udp_hdr *)((char *)udp_hdr - ext_len);
 							scion_cmn_hdr = (struct scion_cmn_hdr *)((char *)scion_cmn_hdr - ext_len);
 							scion_ext_hdr = (struct scion_ext_hdr *)((char *)scion_ext_hdr - ext_len);
+
+							ipv4_hdr0->total_length = rte_cpu_to_be_16(ipv4_total_length0 + ext_len);							
+							ipv4_hdr0->hdr_checksum = 0;
+							udp_hdr->dgram_len = rte_cpu_to_be_16(udp_dgram_length0 + ext_len);
+							udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr0, /* ol_flags: */ 0);
+
+							scion_cmn_hdr->next_hdr = SCION_PROTOCOL_E2E;
+							scion_cmn_hdr->payload_len = rte_cpu_to_be_16(scion_payload_len0 + ext_len);
+
 							memset(scion_ext_hdr, 0, ext_len);
 							scion_ext_hdr->next_hdr = scion_cmn_hdr->next_hdr;
 							scion_ext_hdr->ext_len = ext_len / 4;
+
+							m->l2_len = sizeof *ether_hdr0;
+							m->l3_len = sizeof *ipv4_hdr0;
+							m->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
 						}
 					}
 				}
