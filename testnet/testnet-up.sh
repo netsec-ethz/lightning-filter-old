@@ -9,11 +9,11 @@ sudo ip netns add far-0
 sudo ip netns add near-1
 sudo ip netns add far-1
 
-sudo ip link add one address 00:76:65:74:68:01 type veth peer name two address 00:76:65:74:68:02
-sudo ip link add three address 00:76:65:74:68:03 type veth peer name four address 00:76:65:74:68:04
+sudo ip link add one address 00:76:65:74:68:31 type veth peer name two address 00:76:65:74:68:32
+sudo ip link add three address 00:76:65:74:68:33 type veth peer name four address 00:76:65:74:68:34
 
-sudo ip link add five address 00:76:65:74:68:05 type veth peer name six address 00:76:65:74:68:06
-sudo ip link add seven address 00:76:65:74:68:07 type veth peer name eight address 00:76:65:74:68:08
+sudo ip link add five address 00:76:65:74:68:35 type veth peer name six address 00:76:65:74:68:36
+sudo ip link add seven address 00:76:65:74:68:37 type veth peer name eight address 00:76:65:74:68:38
 
 sudo ip link set dev two netns near-0
 sudo ip link set dev three netns near-0
