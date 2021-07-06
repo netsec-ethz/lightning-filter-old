@@ -720,7 +720,8 @@ static void scionfwd_simple_scion_forward(
 #if CHECK_PACKET_STRUCTURE
 					if (unlikely(sizeof *udp_hdr > m->data_len - sizeof *ether_hdr0 - ipv4_hdr_length0)) {
 						// #if LOG_PACKETS
-						printf("[%d] Not yet implemented: UDP header exceeds first buffer segment.\n", lcore_id);
+						printf(
+							"[%d] Not yet implemented: UDP header exceeds first buffer segment.\n", lcore_id);
 						// #endif
 						rte_pktmbuf_free(m);
 						return;
@@ -729,14 +730,17 @@ static void scionfwd_simple_scion_forward(
 					udp_hdr = (struct rte_udp_hdr *)((char *)ipv4_hdr0 + ipv4_hdr_length0);
 
 					uint16_t udp_dst_port = rte_be_to_cpu_16(udp_hdr->dst_port);
-					if (((SCION_BR_DEFAULT_PORT_LO <= udp_dst_port) && (udp_dst_port <= SCION_BR_DEFAULT_PORT_HI))
-						|| (udp_dst_port == SCION_BR_TESTNET_PORT_0) || (udp_dst_port == SCION_BR_TESTNET_PORT_1))
+					if (((SCION_BR_DEFAULT_PORT_LO <= udp_dst_port)
+								&& (udp_dst_port <= SCION_BR_DEFAULT_PORT_HI))
+							|| (udp_dst_port == SCION_BR_TESTNET_PORT_0)
+							|| (udp_dst_port == SCION_BR_TESTNET_PORT_1))
 					{
 						uint16_t udp_dgram_length0 = rte_be_to_cpu_16(udp_hdr->dgram_len);
 #if CHECK_PACKET_STRUCTURE
 						if (unlikely(udp_dgram_length0 != ipv4_data_length0)) {
 							// #if LOG_PACKETS
-							printf("[%d] Invalid IP packet: total length inconsistent with UDP datagram length.\n",
+							printf(
+								"[%d] Invalid IP packet: total length inconsistent with UDP datagram length.\n",
 								lcore_id);
 							// #endif
 							rte_pktmbuf_free(m);
@@ -746,7 +750,8 @@ static void scionfwd_simple_scion_forward(
 #if CHECK_PACKET_STRUCTURE
 						if (unlikely(udp_dgram_length0 < sizeof *udp_hdr)) {
 							// #if LOG_PACKETS
-							printf("[%d] Invalid UDP packet: datagram length smaller than header length.\n", lcore_id);
+							printf(
+								"[%d] Invalid UDP packet: datagram length smaller than header length.\n", lcore_id);
 							// #endif
 							rte_pktmbuf_free(m);
 							return;
@@ -769,24 +774,28 @@ static void scionfwd_simple_scion_forward(
 
 						if (scion_cmn_hdr->version_qos_flowid[0] >> 4 == 0) {
 							uint16_t scion_cmn_hdr_len0 = scion_cmn_hdr->hdr_len * 4;
-	
+
 #if CHECK_PACKET_STRUCTURE
 							if (unlikely(scion_cmn_hdr_len0 > udp_data_length0)) {
 								// #if LOG_PACKETS
-								printf("[%d] Invalid SCION packet: header length inconsistent with UDP datagram length.\n",
+								printf(
+									"[%d] Invalid SCION packet: header length inconsistent with UDP datagram "
+									"length.\n",
 									lcore_id);
 								// #endif
 								rte_pktmbuf_free(m);
 								return;
 							}
 #endif
-							
+
 							uint16_t scion_payload_len0 = rte_be_to_cpu_16(scion_cmn_hdr->payload_len);
 
 #if CHECK_PACKET_STRUCTURE
 							if (unlikely(scion_payload_len0 != udp_data_length0 - scion_cmn_hdr_len0)) {
 								// #if LOG_PACKETS
-								printf("[%d] Invalid SCION packet: payload length inconsistent with UDP datagram length.\n",
+								printf(
+									"[%d] Invalid SCION packet: payload length inconsistent with UDP datagram "
+									"length.\n",
 									lcore_id);
 								// #endif
 								rte_pktmbuf_free(m);
@@ -809,7 +818,10 @@ static void scionfwd_simple_scion_forward(
 #if CHECK_PACKET_STRUCTURE
 								if (unlikely(sizeof *scion_ext_hdr > scion_payload_len0)) {
 									// #if LOG_PACKETS
-									printf("[%d] Invalid SCION packet: payload length inconsistent with minimum HBH header length.\n", lcore_id);
+									printf(
+										"[%d] Invalid SCION packet: payload length inconsistent with minimum HBH "
+										"header length.\n",
+										lcore_id);
 									// #endif
 									rte_pktmbuf_free(m);
 									return;
@@ -821,7 +833,10 @@ static void scionfwd_simple_scion_forward(
 #if CHECK_PACKET_STRUCTURE
 								if (unlikely(sizeof *scion_ext_hdr > ext_len)) {
 									// #if LOG_PACKETS
-									printf("[%d] Invalid SCION packet: HBH header length inconsistent with minimum HBH header length.\n", lcore_id);
+									printf(
+										"[%d] Invalid SCION packet: HBH header length inconsistent with minimum HBH "
+										"header length.\n",
+										lcore_id);
 									// #endif
 									rte_pktmbuf_free(m);
 									return;
@@ -830,13 +845,16 @@ static void scionfwd_simple_scion_forward(
 #if CHECK_PACKET_STRUCTURE
 								if (unlikely(ext_len > scion_payload_len0)) {
 									// #if LOG_PACKETS
-									printf("[%d] Invalid SCION packet: payload length inconsistent with HBH header length.\n", lcore_id);
+									printf(
+										"[%d] Invalid SCION packet: payload length inconsistent with HBH header "
+										"length.\n",
+										lcore_id);
 									// #endif
 									rte_pktmbuf_free(m);
 									return;
 								}
 #endif
-								
+
 								next_hdr = scion_ext_hdr->next_hdr;
 
 								scion_ext_hdr = (struct scion_ext_hdr *)((char *)scion_ext_hdr + ext_len);
@@ -844,19 +862,20 @@ static void scionfwd_simple_scion_forward(
 
 							if (unlikely(next_hdr == SCION_PROTOCOL_E2E)) {
 								// #if LOG_PACKETS
-								printf("[%d] Not yet implemented: SCION packet already contains E2E header.\n", lcore_id);
+								printf("[%d] Not yet implemented: SCION packet already contains E2E header.\n",
+									lcore_id);
 								// #endif
 								rte_pktmbuf_free(m);
 								return;
 							}
 
 							uint16_t ext_len = 24;
+							RTE_ASSERT(ext_len % 4 == 0);
 
 							char *p = rte_pktmbuf_prepend(m, ext_len);
 							RTE_ASSERT(p != NULL);
 
 							size_t d = (char *)scion_ext_hdr - (char *)ether_hdr0;
-
 							rte_memcpy((char *)ether_hdr0 - ext_len, ether_hdr0, d);
 
 							ether_hdr0 = (struct rte_ether_hdr *)((char *)ether_hdr0 - ext_len);
@@ -865,21 +884,26 @@ static void scionfwd_simple_scion_forward(
 							scion_cmn_hdr = (struct scion_cmn_hdr *)((char *)scion_cmn_hdr - ext_len);
 							scion_ext_hdr = (struct scion_ext_hdr *)((char *)scion_ext_hdr - ext_len);
 
-							ipv4_hdr0->total_length = rte_cpu_to_be_16(ipv4_total_length0 + ext_len);							
+							uint64_t ol_flags = m->ol_flags;
+							ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
+
+							ipv4_hdr0->total_length = rte_cpu_to_be_16(ipv4_total_length0 + ext_len);
 							ipv4_hdr0->hdr_checksum = 0;
+
 							udp_hdr->dgram_len = rte_cpu_to_be_16(udp_dgram_length0 + ext_len);
-							udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr0, /* ol_flags: */ 0);
+							udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr0, ol_flags);
 
 							scion_cmn_hdr->next_hdr = SCION_PROTOCOL_E2E;
 							scion_cmn_hdr->payload_len = rte_cpu_to_be_16(scion_payload_len0 + ext_len);
 
 							memset(scion_ext_hdr, 0, ext_len);
-							scion_ext_hdr->next_hdr = scion_cmn_hdr->next_hdr;
-							scion_ext_hdr->ext_len = ext_len / 4;
+							scion_ext_hdr->next_hdr = next_hdr;
+							scion_ext_hdr->ext_len = ext_len / 4 - 1;
 
 							m->l2_len = sizeof *ether_hdr0;
 							m->l3_len = sizeof *ipv4_hdr0;
-							m->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
+							m->l4_len = sizeof *udp_hdr;
+							m->ol_flags = ol_flags;
 						}
 					}
 				}
