@@ -169,6 +169,12 @@ static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
 #define SCION_PROTOCOL_HBH 200
 #define SCION_PROTOCOL_E2E 201
 
+#define SCION_E2E_OPTION_TYPE_PAD1 0
+#define SCION_E2E_OPTION_TYPE_PADN 1
+#define SCION_E2E_OPTION_TYPE_SPAO 2
+
+#define SCION_SPAO_ALGORITHM_TYPE_EXP 253
+
 struct scion_cmn_hdr {
 	uint8_t version_qos_flowid[4];
 	uint8_t next_hdr;
@@ -182,6 +188,17 @@ struct scion_cmn_hdr {
 struct scion_ext_hdr {
 	uint8_t next_hdr;
 	uint8_t ext_len;
+} __attribute__((__packed__));
+
+struct scion_pad1_opt {
+	uint8_t opt_type;
+} __attribute__((__packed__));
+
+struct scion_packet_authenticator_opt {
+	uint8_t type;
+	uint8_t data_len;
+	uint8_t algorithm;
+	uint8_t authenticator[16];
 } __attribute__((__packed__));
 
 /**
@@ -828,7 +845,7 @@ static void scionfwd_simple_scion_forward(
 								}
 #endif
 
-								uint16_t ext_len = scion_ext_hdr->ext_len * 4;
+								uint16_t ext_len = (scion_ext_hdr->ext_len + 1) * 4;
 
 #if CHECK_PACKET_STRUCTURE
 								if (unlikely(sizeof *scion_ext_hdr > ext_len)) {
@@ -869,14 +886,26 @@ static void scionfwd_simple_scion_forward(
 								return;
 							}
 
-							uint16_t ext_len = 24;
+							struct scion_packet_authenticator_opt *scion_packet_authenticator_opt;
+
+							RTE_ASSERT(sizeof *scion_ext_hdr <= UINT16_MAX);
+							RTE_ASSERT(
+								sizeof *scion_packet_authenticator_opt <= UINT16_MAX - sizeof *scion_ext_hdr);
+							uint16_t ext_len = sizeof *scion_ext_hdr + sizeof *scion_packet_authenticator_opt;
+
+							// compute padding such that ext_len is a multiple of 4-bytes
+							uint16_t ext_pad = (4 - ext_len % 4) % 4;
+
+							RTE_ASSERT(ext_pad <= UINT16_MAX - ext_len);
+							ext_len += ext_pad;
+							RTE_ASSERT(ext_len / 4 != 0);
 							RTE_ASSERT(ext_len % 4 == 0);
 
 							char *p = rte_pktmbuf_prepend(m, ext_len);
 							RTE_ASSERT(p != NULL);
 
 							size_t d = (char *)scion_ext_hdr - (char *)ether_hdr0;
-							rte_memcpy((char *)ether_hdr0 - ext_len, ether_hdr0, d);
+							(void)memmove((char *)ether_hdr0 - ext_len, ether_hdr0, d);
 
 							ether_hdr0 = (struct rte_ether_hdr *)((char *)ether_hdr0 - ext_len);
 							ipv4_hdr0 = (struct rte_ipv4_hdr *)((char *)ipv4_hdr0 - ext_len);
@@ -887,6 +916,19 @@ static void scionfwd_simple_scion_forward(
 							uint64_t ol_flags = m->ol_flags;
 							ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
 
+							RTE_ASSERT(ext_len <= UINT16_MAX - ipv4_total_length0);
+
+							if (unlikely(ext_len > UINT16_MAX - ipv4_total_length0)) {
+								// #if LOG_PACKETS
+								printf(
+									"[%d] Not yet implemented: SCION packet too big to add extension header\n",
+									lcore_id);
+								// #endif
+								/* drop packet */
+								rte_pktmbuf_free(m);
+								return;
+							}
+
 							ipv4_hdr0->total_length = rte_cpu_to_be_16(ipv4_total_length0 + ext_len);
 							ipv4_hdr0->hdr_checksum = 0;
 
@@ -896,9 +938,44 @@ static void scionfwd_simple_scion_forward(
 							scion_cmn_hdr->next_hdr = SCION_PROTOCOL_E2E;
 							scion_cmn_hdr->payload_len = rte_cpu_to_be_16(scion_payload_len0 + ext_len);
 
-							memset(scion_ext_hdr, 0, ext_len);
 							scion_ext_hdr->next_hdr = next_hdr;
 							scion_ext_hdr->ext_len = ext_len / 4 - 1;
+
+							if (ext_pad == 1) {
+								uint8_t *scion_pad1_opt = (uint8_t *)(scion_ext_hdr + 1);
+								scion_pad1_opt[0] = SCION_E2E_OPTION_TYPE_PAD1;
+							} else if (ext_pad > 1) {
+								uint8_t *scion_padn_opt = (uint8_t *)(scion_ext_hdr + 1);
+								scion_padn_opt[0] = SCION_E2E_OPTION_TYPE_PADN;
+								scion_padn_opt[1] = ext_pad - 2;
+								if (ext_pad > 2) {
+									memset(&scion_padn_opt[2], 0, ext_pad - 2);
+								}
+							}
+
+							scion_packet_authenticator_opt =
+								(struct scion_packet_authenticator_opt *)((char *)(scion_ext_hdr + 1) + ext_pad);
+							scion_packet_authenticator_opt->type = SCION_E2E_OPTION_TYPE_SPAO;
+							scion_packet_authenticator_opt->data_len =
+								sizeof *scion_packet_authenticator_opt - sizeof scion_packet_authenticator_opt->type
+								- sizeof scion_packet_authenticator_opt->data_len;
+							scion_packet_authenticator_opt->algorithm = SCION_SPAO_ALGORITHM_TYPE_EXP;
+							scion_packet_authenticator_opt->authenticator[0] = '0';
+							scion_packet_authenticator_opt->authenticator[1] = '1';
+							scion_packet_authenticator_opt->authenticator[2] = '2';
+							scion_packet_authenticator_opt->authenticator[3] = '3';
+							scion_packet_authenticator_opt->authenticator[4] = '4';
+							scion_packet_authenticator_opt->authenticator[5] = '5';
+							scion_packet_authenticator_opt->authenticator[6] = '6';
+							scion_packet_authenticator_opt->authenticator[7] = '7';
+							scion_packet_authenticator_opt->authenticator[8] = '8';
+							scion_packet_authenticator_opt->authenticator[9] = '9';
+							scion_packet_authenticator_opt->authenticator[10] = 'A';
+							scion_packet_authenticator_opt->authenticator[11] = 'B';
+							scion_packet_authenticator_opt->authenticator[12] = 'C';
+							scion_packet_authenticator_opt->authenticator[13] = 'D';
+							scion_packet_authenticator_opt->authenticator[14] = 'E';
+							scion_packet_authenticator_opt->authenticator[15] = 'F';
 
 							m->l2_len = sizeof *ether_hdr0;
 							m->l3_len = sizeof *ipv4_hdr0;
