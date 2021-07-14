@@ -12,14 +12,15 @@ CFLAGS += -I$(SRCDIR)
 
 # AESNI
 ifeq ($(UNAME_M), x86_64)
-	LDLIBS += -L'$(PWD)/lib/aesni'
-	EXTRA_LDFLAGS += -laesni
+	LDFLAGS += -L$(PWD)/lib/aesni
+	LDLIBS += -laesni
 else
+	SRCS-y += lf_crypto.c
 	LDLIBS += -lcrypto
 endif
 
 # DRKey
-LDLIBS += -L'$(PWD)/lib/drkey'
-EXTRA_LDFLAGS += -ldrkey
+LDFLAGS += -L$(PWD)/lib/drkey
+LDLIBS += -ldrkey
 
 include $(RTE_SDK)/mk/rte.extapp.mk

@@ -75,7 +75,7 @@
 #if defined __x86_64__ && __x86_64__
 	#include "lib/aesni/aesni.h"
 #else
-	#include <openssl/evp.h>
+	#include "lf_crypto.h"
 #endif
 
 #include "lib/drkey/libdrkey.h"
@@ -198,7 +198,9 @@ struct scion_packet_authenticator_opt {
 	uint8_t type;
 	uint8_t data_len;
 	uint8_t algorithm;
-	uint8_t authenticator[16];
+	uint8_t reserved[2];
+	uint8_t l4_payload_chksum[BLOCK_SIZE];
+	uint16_t l4_payload_len;
 } __attribute__((__packed__));
 
 /**
@@ -208,7 +210,7 @@ struct lf_hdr {
 	uint8_t lf_pkt_type;
 	uint8_t reserved[3];
 	uint64_t src_ia;
-	uint8_t encaps_pkt_chksum[16];
+	uint8_t encaps_pkt_chksum[BLOCK_SIZE];
 	uint16_t encaps_pkt_len;
 } __attribute__((__packed__));
 
@@ -598,38 +600,15 @@ static void compute_lf_chksum(const unsigned lcore_id, unsigned char drkey[BLOCK
 #else
 	(void)rkey_buf;
 
-	int r, n;
-	unsigned char key[BLOCK_SIZE], iv[IV_SIZE];
-
 	EVP_CIPHER_CTX *ctx = cipher_ctx[lcore_id];
 
 	// derive the second-order key based on the first order key
+	unsigned char key[BLOCK_SIZE];
 	(void)rte_memcpy(key, drkey, BLOCK_SIZE);
-	(void)memset(iv, 0, IV_SIZE);
-	r = EVP_CIPHER_CTX_reset(ctx);
-	RTE_ASSERT(r == 1);
-	r = EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, key, iv);
-	RTE_ASSERT(r == 1);
-	r = EVP_CIPHER_CTX_set_padding(ctx, 0);
-	RTE_ASSERT(r == 1);
-	r = EVP_EncryptUpdate(ctx, chksum, &n, addr_buf, 32);
-	RTE_ASSERT((r == 1) && (n == 32));
-	r = EVP_EncryptFinal_ex(ctx, &chksum[n], &n);
-	RTE_ASSERT((r == 1) && (n == 0));
+	lf_crypto_cbcmac(ctx, drkey, addr_buf, 32, key);
 
 	// compute per-packet MAC using the second-order key
-	(void)rte_memcpy(key, chksum, BLOCK_SIZE);
-	(void)memset(iv, 0, IV_SIZE);
-	r = EVP_CIPHER_CTX_reset(ctx);
-	RTE_ASSERT(r == 1);
-	r = EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, key, iv);
-	RTE_ASSERT(r == 1);
-	r = EVP_CIPHER_CTX_set_padding(ctx, 0);
-	RTE_ASSERT(r == 1);
-	r = EVP_EncryptUpdate(ctx, chksum, &n, data, (int)data_len);
-	RTE_ASSERT((r == 1) && (n == (int)data_len));
-	r = EVP_EncryptFinal_ex(ctx, &chksum[n], &n);
-	RTE_ASSERT((r == 1) && (n == 0));
+	lf_crypto_cbcmac(ctx, key, data, data_len, chksum);
 #endif
 }
 
@@ -825,6 +804,8 @@ static void scionfwd_simple_scion_forward(
 							struct scion_ext_hdr *scion_ext_hdr;
 							scion_ext_hdr = (struct scion_ext_hdr *)((char *)scion_cmn_hdr + scion_cmn_hdr_len0);
 
+							uint16_t total_ext_len = 0;
+
 							if (unlikely(next_hdr == SCION_PROTOCOL_HBH)) {
 								// #if LOG_PACKETS
 								printf("[%d] Not yet implemented: SCION packet contains HBH header.\n", lcore_id);
@@ -872,6 +853,8 @@ static void scionfwd_simple_scion_forward(
 								}
 #endif
 
+								total_ext_len += ext_len;
+
 								next_hdr = scion_ext_hdr->next_hdr;
 
 								scion_ext_hdr = (struct scion_ext_hdr *)((char *)scion_ext_hdr + ext_len);
@@ -901,6 +884,8 @@ static void scionfwd_simple_scion_forward(
 							RTE_ASSERT(ext_len / 4 != 0);
 							RTE_ASSERT(ext_len % 4 == 0);
 
+							total_ext_len += ext_len;
+
 							char *p = rte_pktmbuf_prepend(m, ext_len);
 							RTE_ASSERT(p != NULL);
 
@@ -920,8 +905,7 @@ static void scionfwd_simple_scion_forward(
 
 							if (unlikely(ext_len > UINT16_MAX - ipv4_total_length0)) {
 								// #if LOG_PACKETS
-								printf(
-									"[%d] Not yet implemented: SCION packet too big to add extension header\n",
+								printf("[%d] Not yet implemented: SCION packet too big to add extension header\n",
 									lcore_id);
 								// #endif
 								/* drop packet */
@@ -935,8 +919,10 @@ static void scionfwd_simple_scion_forward(
 							udp_hdr->dgram_len = rte_cpu_to_be_16(udp_dgram_length0 + ext_len);
 							udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr0, ol_flags);
 
+							uint16_t scion_payload_len = scion_payload_len0 + ext_len;
+
 							scion_cmn_hdr->next_hdr = SCION_PROTOCOL_E2E;
-							scion_cmn_hdr->payload_len = rte_cpu_to_be_16(scion_payload_len0 + ext_len);
+							scion_cmn_hdr->payload_len = rte_cpu_to_be_16(scion_payload_len);
 
 							scion_ext_hdr->next_hdr = next_hdr;
 							scion_ext_hdr->ext_len = ext_len / 4 - 1;
@@ -960,22 +946,79 @@ static void scionfwd_simple_scion_forward(
 								sizeof *scion_packet_authenticator_opt - sizeof scion_packet_authenticator_opt->type
 								- sizeof scion_packet_authenticator_opt->data_len;
 							scion_packet_authenticator_opt->algorithm = SCION_SPAO_ALGORITHM_TYPE_EXP;
-							scion_packet_authenticator_opt->authenticator[0] = '0';
-							scion_packet_authenticator_opt->authenticator[1] = '1';
-							scion_packet_authenticator_opt->authenticator[2] = '2';
-							scion_packet_authenticator_opt->authenticator[3] = '3';
-							scion_packet_authenticator_opt->authenticator[4] = '4';
-							scion_packet_authenticator_opt->authenticator[5] = '5';
-							scion_packet_authenticator_opt->authenticator[6] = '6';
-							scion_packet_authenticator_opt->authenticator[7] = '7';
-							scion_packet_authenticator_opt->authenticator[8] = '8';
-							scion_packet_authenticator_opt->authenticator[9] = '9';
-							scion_packet_authenticator_opt->authenticator[10] = 'A';
-							scion_packet_authenticator_opt->authenticator[11] = 'B';
-							scion_packet_authenticator_opt->authenticator[12] = 'C';
-							scion_packet_authenticator_opt->authenticator[13] = 'D';
-							scion_packet_authenticator_opt->authenticator[14] = 'E';
-							scion_packet_authenticator_opt->authenticator[15] = 'F';
+
+							scion_packet_authenticator_opt->reserved[0] = 0;
+							scion_packet_authenticator_opt->reserved[1] = 0;
+
+							uint16_t l4_payload_len = scion_payload_len - total_ext_len;
+
+							scion_packet_authenticator_opt->l4_payload_len = rte_cpu_to_be_16(l4_payload_len);
+
+							uint16_t l4_payload_trl_len =
+								(16 - (sizeof scion_packet_authenticator_opt->l4_payload_len + l4_payload_len) % 16)
+								% 16;
+
+							if (l4_payload_trl_len != 0) {
+								p = rte_pktmbuf_append(m, l4_payload_trl_len);
+								RTE_ASSERT(p == (char *)(scion_packet_authenticator_opt + 1) + l4_payload_len);
+								(void)memset(p, 0, l4_payload_trl_len);
+							}
+
+							rte_be64_t src_ia = config.isd_as;
+
+							struct timeval tv;
+							int r = gettimeofday(&tv, NULL);
+							if (unlikely(r != 0)) {
+								RTE_ASSERT(r == -1);
+								// #if LOG_PACKETS
+								printf("[%d] Syscall gettimeofday failed.\n", lcore_id);
+								// #endif
+								/* drop packet */
+								rte_pktmbuf_free(m);
+								return;
+							}
+							RTE_ASSERT((INT64_MIN <= tv.tv_sec) && (tv.tv_sec <= INT64_MAX));
+							int64_t t_now = tv.tv_sec;
+							struct key_dictionary *kd = key_dictionaries[lcore_id];
+							key_dictionary_find(kd, src_ia);
+							struct key_store_node *n = kd->value;
+							if (n == NULL) {
+								// #if LOG_PACKETS
+								printf("[%d] Key store lookup failed.\n", lcore_id);
+								// #endif
+								/* drop packet */
+								rte_pktmbuf_free(m);
+								return;
+							}
+							struct delegation_secret *ds = get_delegation_secret(n, t_now);
+							if (ds == NULL) {
+								// #if LOG_PACKETS
+								printf("[%d] Delegation secret lookup failed.\n", lcore_id);
+								// #endif
+								/* drop packet */
+								rte_pktmbuf_free(m);
+								return;
+							}
+#if LOG_PACKETS
+							printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, src_ia, t_now);
+							dump_hex(lcore_id, ds->key, 16);
+							printf("[%d] }\n", lcore_id);
+#endif
+
+							compute_lf_chksum(lcore_id,
+								/* drkey: */ ds->key,
+								/* src_addr: */ 0 /* TODO */,
+								/* dst_addr: */ 0 /* TODO */,
+								/* data: */ &scion_packet_authenticator_opt->l4_payload_len,
+								/* data_len: */ sizeof scion_packet_authenticator_opt->l4_payload_len
+									+ l4_payload_len + l4_payload_trl_len,
+								/* chksum: */ &scion_packet_authenticator_opt->l4_payload_chksum[0],
+								/* rkey_buf: */ roundkey[lcore_id],
+								/* addr_buf: */ key_hosts_addrs[lcore_id]);
+							if (l4_payload_trl_len != 0) {
+								int r = rte_pktmbuf_trim(m, l4_payload_trl_len);
+								RTE_ASSERT(r == 0);
+							}
 
 							m->l2_len = sizeof *ether_hdr0;
 							m->l3_len = sizeof *ipv4_hdr0;
