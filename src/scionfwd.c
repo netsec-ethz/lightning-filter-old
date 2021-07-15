@@ -185,6 +185,13 @@ struct scion_cmn_hdr {
 	uint16_t rsv;
 } __attribute__((__packed__));
 
+struct scion_addr_hdr {
+	uint64_t dst_ia;
+	uint64_t src_ia;
+	int32_t dst_host_addr;
+	int32_t src_host_addr;
+} __attribute__((__packed__));
+
 struct scion_ext_hdr {
 	uint8_t next_hdr;
 	uint8_t ext_len;
@@ -388,6 +395,7 @@ int64_t current_pool[2];
 /* system configuration */
 
 static char scionfwd_config[PATH_MAX] = "config/end_hosts.cfg";
+static char sciond_addr[48] = "127.0.0.1:30255";
 
 // mask of receiving ports
 static uint32_t scionfwd_rx_port_mask = 0;
@@ -768,7 +776,7 @@ static void scionfwd_simple_scion_forward(
 #endif
 						scion_cmn_hdr = (struct scion_cmn_hdr *)(udp_hdr + 1);
 
-						if (scion_cmn_hdr->version_qos_flowid[0] >> 4 == 0) {
+						if (likely(scion_cmn_hdr->version_qos_flowid[0] >> 4 == 0)) {
 							uint16_t scion_cmn_hdr_len0 = scion_cmn_hdr->hdr_len * 4;
 
 #if CHECK_PACKET_STRUCTURE
@@ -783,6 +791,39 @@ static void scionfwd_simple_scion_forward(
 								return;
 							}
 #endif
+#if CHECK_PACKET_STRUCTURE
+							if (unlikely(sizeof *scion_cmn_hdr > scion_cmn_hdr_len0)) {
+								// #if LOG_PACKETS
+								printf(
+									"[%d] Invalid SCION packet: common header length inconsistent with length of common header.\n",
+									lcore_id);
+								// #endif
+								rte_pktmbuf_free(m);
+								return;
+							}
+#endif
+
+							if (unlikely(scion_cmn_hdr->dt_dl_st_sl != 0)) {
+								// #if LOG_PACKETS
+								printf("[%d] Not yet implemented: SCION packet contains unsupported host-address types/lengths.\n", lcore_id);
+								// #endif
+								rte_pktmbuf_free(m);
+								return;
+							}
+
+							struct scion_addr_hdr *scion_addr_hdr;
+#if CHECK_PACKET_STRUCTURE
+							if (unlikely(sizeof *scion_addr_hdr > scion_cmn_hdr_len0 - sizeof *scion_cmn_hdr)) {
+								// #if LOG_PACKETS
+								printf(
+									"[%d] Invalid SCION packet: address header length inconsistent with header length.\n",
+									lcore_id);
+								// #endif
+								rte_pktmbuf_free(m);
+								return;
+							}
+#endif
+							scion_addr_hdr = (struct scion_addr_hdr *)(scion_cmn_hdr + 1);
 
 							uint16_t scion_payload_len0 = rte_be_to_cpu_16(scion_cmn_hdr->payload_len);
 
@@ -965,6 +1006,7 @@ static void scionfwd_simple_scion_forward(
 							}
 
 							rte_be64_t src_ia = config.isd_as;
+printf("@@@ src_ia=%" PRIx64 "\n", src_ia);						
 
 							struct timeval tv;
 							int r = gettimeofday(&tv, NULL);
@@ -3007,7 +3049,8 @@ static const char short_options[] =
 	"R:" /* bloom error rate */
 	"D:" /* bloom interval */
 	"K:" /* key grace period */
-	"C:" /* config file */
+	"c:" /* config file */
+	"s:" /* sciond address */
 	;
 
 /*
@@ -3096,12 +3139,20 @@ static int scionfwd_parse_args(int argc, char **argv) {
 				delta_us = scionfwd_parse_timer_period(optarg);
 				break;
 
-			case 'C':
+			case 'c':
 				if (strlen(optarg) >= sizeof scionfwd_config) {
 					scionfwd_usage(prgname);
 					return -1;
 				}
 				(void)strcpy(scionfwd_config, optarg);
+				break;
+
+			case 's':
+				if (strlen(optarg) >= sizeof sciond_addr) {
+					scionfwd_usage(prgname);
+					return -1;
+				}
+				(void)strcpy(sciond_addr, optarg);
 				break;
 
 			case 0:
