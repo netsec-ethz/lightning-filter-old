@@ -24,3 +24,6 @@ prometheus = "127.0.0.27:30455"
 
 [log.console]
 level = "debug"
+
+[drkey_db]
+connection = "gen-cache/sd1-ff00_0_112.drkey.db"
