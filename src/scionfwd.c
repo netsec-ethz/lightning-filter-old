@@ -95,8 +95,8 @@
 
 #define ENABLE_KEY_MANAGEMENT 0
 #define ENABLE_MEASUREMENTS 0
-#define ENFORCE_DUPLICATE_FILTER 0
-#define ENFORCE_LF_RATE_LIMIT_FILTER 1
+#define ENABLE_DUPLICATE_FILTER 0
+#define ENABLE_RATE_LIMIT_FILTER 1
 #define LOG_DELEGATION_SECRETS 0
 #define LOG_PACKETS 1
 #define CHECK_PACKET_STRUCTURE 1
@@ -583,10 +583,22 @@ static struct delegation_secret *get_delegation_secret(struct key_store_node *n,
 	return ds;
 }
 
-static void compute_lf_chksum(const unsigned lcore_id, unsigned char drkey[BLOCK_SIZE],
-	rte_be32_t src_addr, rte_be32_t dst_addr, void *data, size_t data_len,
-	unsigned char chksum[BLOCK_SIZE], unsigned char rkey_buf[10 * BLOCK_SIZE],
-	unsigned char addr_buf[32]) {
+static int get_time(unsigned lcore_id, struct timeval *tv_now) {
+	int r = gettimeofday(tv_now, NULL);
+	if (unlikely(r != 0)) {
+		RTE_ASSERT(r == -1);
+		// #if LOG_PACKETS
+		printf("[%d] Syscall gettimeofday failed.\n", lcore_id);
+		// #endif
+		return -1;
+	}
+	RTE_ASSERT((INT64_MIN <= tv_now->tv_sec) && (tv_now->tv_sec <= INT64_MAX));
+	return 0;
+}
+
+static void compute_chksum(unsigned lcore_id, unsigned char drkey[BLOCK_SIZE], rte_be32_t src_addr,
+	rte_be32_t dst_addr, void *data, size_t data_len, unsigned char chksum[BLOCK_SIZE],
+	unsigned char rkey_buf[10 * BLOCK_SIZE], unsigned char addr_buf[32]) {
 	RTE_ASSERT(data_len % BLOCK_SIZE == 0);
 	RTE_ASSERT(data_len <= INT_MAX);
 	(void)memset(addr_buf, 0, 32);
@@ -620,9 +632,188 @@ static void compute_lf_chksum(const unsigned lcore_id, unsigned char drkey[BLOCK
 #endif
 }
 
+static int check_authenticator(unsigned lcore_id, struct timeval tv_now, uint64_t src_ia,
+	rte_be32_t src_addr, rte_be32_t dst_addr, void *data, size_t data_len, unsigned char *chksum) {
+	int64_t t_now = tv_now.tv_sec;
+	struct key_dictionary *kd = key_dictionaries[lcore_id];
+	key_dictionary_find(kd, src_ia);
+	struct key_store_node *n = kd->value;
+	if (unlikely(n == NULL)) {
+		// #if LOG_PACKETS
+		printf("[%d] Key store lookup for %0lx failed.\n", lcore_id, src_ia);
+		// #endif
+		return -1;
+	}
+	struct delegation_secret *ds = get_delegation_secret(n, t_now);
+	if (unlikely(ds == NULL)) {
+		// #if LOG_PACKETS
+		printf("[%d] Delegation secret lookup failed.\n", lcore_id);
+		// #endif
+		return -1;
+	}
+#if LOG_PACKETS
+	printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, src_ia, t_now);
+	dump_hex(lcore_id, ds->key, 16);
+	printf("[%d] }\n", lcore_id);
+#endif
+	compute_chksum(lcore_id, ds->key, src_addr, dst_addr, data, data_len,
+		/* chksum: */ computed_cmac[lcore_id],
+		/* rkey_buf: */ roundkey[lcore_id],
+		/* addr_buf: */ key_hosts_addrs[lcore_id]);
+	bool auth_pkt = crypto_cmp_16(chksum, computed_cmac[lcore_id]) == 0;
+	if (unlikely(!auth_pkt && (ds->validity_not_after - t_now < max_key_validity_extension))) {
+		// the current delegation secret has expired -> try again with the next delegation
+		// secret
+		ds = &n->key_store->delegation_secrets[NEXT_KEY_INDEX(n->key_index)];
+		if (ds->validity_not_before < ds->validity_not_after) {
+#if LOG_PACKETS
+			printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, src_ia, t_now);
+			dump_hex(lcore_id, ds->key, 16);
+			printf("[%d] }\n", lcore_id);
+#endif
+			compute_chksum(lcore_id, ds->key, src_addr, dst_addr, data, data_len,
+				/* chksum: */ computed_cmac[lcore_id],
+				/* rkey_buf: */ roundkey[lcore_id],
+				/* addr_buf: */ key_hosts_addrs[lcore_id]);
+			auth_pkt = crypto_cmp_16(chksum, computed_cmac[lcore_id]) == 0;
+		}
+	}
+	if (unlikely(!auth_pkt && (t_now - ds->validity_not_before < max_key_validity_extension))) {
+		// the current delegation secret is not valid yet -> try again with the previous
+		// delegation secret
+		ds = &n->key_store->delegation_secrets[PREV_KEY_INDEX(n->key_index)];
+		if (ds->validity_not_before < ds->validity_not_after) {
+#if LOG_PACKETS
+			printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, src_ia, t_now);
+			dump_hex(lcore_id, ds->key, 16);
+			printf("[%d] }\n", lcore_id);
+#endif
+			compute_chksum(lcore_id, ds->key, src_addr, dst_addr, data, data_len,
+				/* chksum: */ computed_cmac[lcore_id],
+				/* rkey_buf: */ roundkey[lcore_id],
+				/* addr_buf: */ key_hosts_addrs[lcore_id]);
+			auth_pkt = crypto_cmp_16(chksum, computed_cmac[lcore_id]) == 0;
+		}
+	}
+	if (unlikely(!auth_pkt)) {
+		// #if LOG_PACKETS
+		printf("[%d] Invalid packet: checksum verification failed.\n", lcore_id);
+		// #endif
+		return -1;
+	}
+	return 0;
+}
+
+static int apply_duplicate_filter(unsigned lcore_id, struct timeval tv_now, unsigned char *chksum) {
+	struct lcore_values *lcore_values = &core_vars[lcore_id];
+	// Periodically rotate and reset the bloom filters to avoid overcrowding
+	lcore_values->cur_ts = tv_now;
+	if ((lcore_values->cur_ts.tv_sec - lcore_values->last_ts.tv_sec) * 1000000
+				+ lcore_values->cur_ts.tv_usec - lcore_values->last_ts.tv_usec
+			> delta_us)
+	{
+		lcore_values->active_filter_id = (lcore_values->active_filter_id + 1) % MAX_BLOOM_FILTERS;
+		bloom_free(&lcore_values->bloom_filters[lcore_values->active_filter_id]);
+		bloom_init(&lcore_values->bloom_filters[lcore_values->active_filter_id], NUM_BLOOM_ENTRIES,
+			1.0 / BLOOM_ERROR_RATE);
+		lcore_values->last_ts = lcore_values->cur_ts;
+	}
+	int dup = sc_bloom_add(
+		lcore_values->bloom_filters, MAX_BLOOM_FILTERS, lcore_values->active_filter_id, chksum, 16);
+	if (dup != 0) {
+		lcore_values->stats.bloom_filter_hit_counter++;
+#if ENABLE_DUPLICATE_FILTER
+		// #if LOG_PACKETS
+		printf("[%d] Duplicate LF packet.\n", lcore_id);
+		// #endif
+		return -1;
+#endif
+	} else {
+		lcore_values->stats.bloom_filter_miss_counter++;
+	}
+	return 0;
+}
+
+static int apply_auth_pkt_rate_limit_filter(
+	unsigned lcore_id, int16_t state, uint64_t src_ia, uint16_t pkt_len) {
+	struct lcore_values *lcore_values = &core_vars[lcore_id];
+#if ENABLE_RATE_LIMIT_FILTER
+	dictionary_flow *lcore_dict = dos_stats[lcore_id].dos_dictionary[state];
+	int r = dic_find_flow(lcore_dict, src_ia);
+	RTE_ASSERT(r == 1);
+	// Rate limit LF traffic
+	if (lcore_dict->value->secX_counter <= 0) {
+		if (lcore_dict->value->sc_counter <= 0) {
+			int64_t reserve = rte_atomic64_read(lcore_dict->value->reserve);
+			if (reserve <= 0) {
+				lcore_values->stats.as_rate_limited++;
+	#if LOG_PACKETS
+				printf("[%d] LF rate limit for %0lx exceeded.\n", lcore_id, src_ia);
+	#endif
+				return -1;
+			} else {
+				rte_atomic64_sub(lcore_dict->value->reserve, pkt_len);
+			}
+		} else {
+			lcore_dict->value->sc_counter -= pkt_len;
+		}
+	} else {
+		lcore_dict->value->secX_counter -= pkt_len;
+	}
+	// Check then for overall rate
+	if (dos_stats[lcore_id].secX_dos_packet_count[state] <= 0) {
+		if (dos_stats[lcore_id].sc_dos_packet_count[state] <= 0) {
+			int64_t reserve = rte_atomic64_read(dos_stats[lcore_id].reserve[state]);
+			if (reserve <= 0) {
+				lcore_values->stats.rate_limited++;
+	#if LOG_PACKETS
+				printf("[%d] LF overall rate limit for %0lx exceeded.\n", lcore_id, src_ia);
+	#endif
+				return -1;
+			} else {
+				rte_atomic64_sub(dos_stats[lcore_id].reserve[state], pkt_len);
+			}
+		} else {
+			dos_stats[lcore_id].sc_dos_packet_count[state] -= pkt_len;
+		}
+	} else {
+		dos_stats[lcore_id].secX_dos_packet_count[state] -= pkt_len;
+	}
+#endif
+	return 0;
+}
+
+static int apply_non_auth_pkt_rate_limit_filter(
+	unsigned lcore_id, int16_t state, uint16_t pkt_len) {
+	struct lcore_values *lcore_values = &core_vars[lcore_id];
+	dictionary_flow *lcore_dict = dos_stats[lcore_id].dos_dictionary[state];
+	int r = dic_find_flow(lcore_dict, 0);
+	RTE_ASSERT(r == 1);
+	// Rate limit non-LF traffic
+	if (lcore_dict->value->sc_counter <= 0) {
+		lcore_values->stats.as_rate_limited++;
+#if LOG_PACKETS
+		printf("[%d] Non-LF rate limit exceeded.\n", lcore_id);
+#endif
+		return -1;
+	} else {
+		lcore_dict->value->sc_counter -= pkt_len;
+	}
+	// Check then for overall rate
+	if (dos_stats[lcore_id].sc_dos_packet_count[state] <= 0) {
+		lcore_values->stats.rate_limited++;
+#if LOG_PACKETS
+		printf("[%d] Non-LF overall rate limit exceeded.\n", lcore_id);
+#endif
+		return -1;
+	} else {
+		dos_stats[lcore_id].sc_dos_packet_count[state] -= pkt_len;
+	}
+	return 0;
+}
+
 static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hdr0,
-	const unsigned lcore_id, struct lcore_values *lvars)
-{
+	const unsigned lcore_id, struct lcore_values *lvars, int16_t state) {
 	RTE_ASSERT(sizeof *ether_hdr0 <= m->data_len);
 	RTE_ASSERT(ether_hdr0->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4));
 	struct rte_ipv4_hdr *ipv4_hdr0;
@@ -636,17 +827,20 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 #endif
 	ipv4_hdr0 = (struct rte_ipv4_hdr *)(ether_hdr0 + 1);
 
-	if (ipv4_hdr0->next_proto_id == IP_PROTO_ID_UDP) {
-		uint16_t ipv4_hdr_length0 = (ipv4_hdr0->version_ihl & RTE_IPV4_HDR_IHL_MASK) * RTE_IPV4_IHL_MULTIPLIER;
+	uint16_t ipv4_total_length0 = rte_be_to_cpu_16(ipv4_hdr0->total_length);
 
-		uint16_t ipv4_total_length0 = rte_be_to_cpu_16(ipv4_hdr0->total_length);
+	bool auth_pkt = false;
+
+	if (ipv4_hdr0->next_proto_id == IP_PROTO_ID_UDP) {
+		uint16_t ipv4_hdr_length0 =
+			(ipv4_hdr0->version_ihl & RTE_IPV4_HDR_IHL_MASK) * RTE_IPV4_IHL_MULTIPLIER;
 
 #if CHECK_PACKET_STRUCTURE
 		if (unlikely(ipv4_hdr_length0 < sizeof *ipv4_hdr0)) {
 			// #if LOG_PACKETS
 			printf("[%d] Invalid IP packet: header length too small.\n", lcore_id);
 			// #endif
-			return - 1;
+			return -1;
 		}
 #endif
 #if CHECK_PACKET_STRUCTURE
@@ -667,8 +861,7 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 #if CHECK_PACKET_STRUCTURE
 		if (unlikely(sizeof *udp_hdr > m->data_len - sizeof *ether_hdr0 - ipv4_hdr_length0)) {
 			// #if LOG_PACKETS
-			printf(
-				"[%d] Not yet implemented: UDP header exceeds first buffer segment.\n", lcore_id);
+			printf("[%d] Not yet implemented: UDP header exceeds first buffer segment.\n", lcore_id);
 			// #endif
 			return -1;
 		}
@@ -680,8 +873,7 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 		if (unlikely(udp_dgram_length0 != ipv4_data_length0)) {
 			// #if LOG_PACKETS
 			printf(
-				"[%d] Invalid IP packet: total length inconsistent with UDP datagram length.\n",
-				lcore_id);
+				"[%d] Invalid IP packet: total length inconsistent with UDP datagram length.\n", lcore_id);
 			// #endif
 			return -1;
 		}
@@ -689,8 +881,7 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 #if CHECK_PACKET_STRUCTURE
 		if (unlikely(udp_dgram_length0 < sizeof *udp_hdr)) {
 			// #if LOG_PACKETS
-			printf(
-				"[%d] Invalid UDP packet: datagram length smaller than header length.\n", lcore_id);
+			printf("[%d] Invalid UDP packet: datagram length smaller than header length.\n", lcore_id);
 			// #endif
 			return -1;
 		}
@@ -727,7 +918,8 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 			if (unlikely(sizeof *scion_cmn_hdr > scion_cmn_hdr_len0)) {
 				// #if LOG_PACKETS
 				printf(
-					"[%d] Invalid SCION packet: common header length inconsistent with length of common header.\n",
+					"[%d] Invalid SCION packet: common header length inconsistent with length of common "
+					"header.\n",
 					lcore_id);
 				// #endif
 				return -1;
@@ -736,7 +928,10 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 
 			if (unlikely(scion_cmn_hdr->dt_dl_st_sl != 0)) {
 				// #if LOG_PACKETS
-				printf("[%d] Not yet implemented: SCION packet contains unsupported host-address types/lengths.\n", lcore_id);
+				printf(
+					"[%d] Not yet implemented: SCION packet contains unsupported host-address "
+					"types/lengths.\n",
+					lcore_id);
 				// #endif
 				return -1;
 			}
@@ -864,7 +1059,8 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 				if (unlikely(total_ext_len > scion_payload_len0)) {
 					// #if LOG_PACKETS
 					printf(
-						"[%d] Invalid SCION packet: payload length inconsistent with extension header lengths.\n",
+						"[%d] Invalid SCION packet: payload length inconsistent with extension header "
+						"lengths.\n",
 						lcore_id);
 					// #endif
 					return -1;
@@ -880,75 +1076,132 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 					} else {
 						if (unlikely(2 > j - i)) {
 							// #if LOG_PACKETS
-							printf(
-								"[%d] Invalid SCION packet: inconsistent E2E option data.\n",
-								lcore_id);
+							printf("[%d] Invalid SCION packet: inconsistent E2E option data.\n", lcore_id);
 							// #endif
 							return -1;
 						}
 						size_t opt_data_len = scion_ext_hdr_options[i + 1];
 						if (unlikely(opt_data_len > j - i - 2)) {
 							// #if LOG_PACKETS
-							printf(
-								"[%d] Invalid SCION packet: inconsistent E2E option data.\n",
-								lcore_id);
+							printf("[%d] Invalid SCION packet: inconsistent E2E option data.\n", lcore_id);
 							// #endif
 							return -1;
 						}
 						if (scion_ext_hdr_options[i] == SCION_E2E_OPTION_TYPE_SPAO) {
 							if (unlikely(i + 2 + opt_data_len != j)) {
 								// #if LOG_PACKETS
-								printf("[%d] Not yet implemented: SCION packet authenticator option not at the end of E2E header.\n",
+								printf(
+									"[%d] Not yet implemented: SCION packet authenticator option not at the end of "
+									"E2E header.\n",
 									lcore_id);
 								// #endif
 								return -1;
 							}
 							struct scion_packet_authenticator_opt *scion_packet_authenticator_opt;
 							RTE_ASSERT(sizeof *scion_ext_hdr <= UINT16_MAX);
-							RTE_ASSERT(sizeof *scion_packet_authenticator_opt <= UINT16_MAX - sizeof *scion_ext_hdr);
+							RTE_ASSERT(
+								sizeof *scion_packet_authenticator_opt <= UINT16_MAX - sizeof *scion_ext_hdr);
 							if (unlikely(2 + opt_data_len != sizeof *scion_packet_authenticator_opt)) {
 								// #if LOG_PACKETS
 								printf(
-									"[%d] Invalid SCION packet: E2E option data length inconsistent with packet authenticator option length.\n",
+									"[%d] Invalid SCION packet: E2E option data length inconsistent with packet "
+									"authenticator option length.\n",
 									lcore_id);
 								// #endif
 								return -1;
 							}
-							scion_packet_authenticator_opt = (struct scion_packet_authenticator_opt *)&scion_ext_hdr_options[i];
-							if (unlikely(scion_packet_authenticator_opt->algorithm != SCION_SPAO_ALGORITHM_TYPE_EXP)) {
+							scion_packet_authenticator_opt =
+								(struct scion_packet_authenticator_opt *)&scion_ext_hdr_options[i];
+							if (unlikely(
+										scion_packet_authenticator_opt->algorithm != SCION_SPAO_ALGORITHM_TYPE_EXP)) {
 								// #if LOG_PACKETS
-								printf("[%d] Not yet implemented: unknown algorithm SCION packet authenticator option.\n",
+								printf(
+									"[%d] Not yet implemented: unknown algorithm SCION packet authenticator "
+									"option.\n",
 									lcore_id);
 								// #endif
 								return -1;
 							}
 #if CHECK_PACKET_STRUCTURE
 							if (unlikely((scion_packet_authenticator_opt->reserved[0] != 0)
-								|| (scion_packet_authenticator_opt->reserved[1] != 0)))
+													 || (scion_packet_authenticator_opt->reserved[1] != 0)))
 							{
 								// #if LOG_PACKETS
 								printf(
-									"[%d] Invalid SCION packet: invalid reserved fields in SCION packet authenticator option.\n",
+									"[%d] Invalid SCION packet: invalid reserved fields in SCION packet "
+									"authenticator option.\n",
 									lcore_id);
 								// #endif
 								return -1;
 							}
 #endif
-							uint16_t l4_payload_len = rte_be_to_cpu_16(scion_packet_authenticator_opt->l4_payload_len);
+							uint16_t l4_payload_len =
+								rte_be_to_cpu_16(scion_packet_authenticator_opt->l4_payload_len);
 #if CHECK_PACKET_STRUCTURE
 							if (unlikely(l4_payload_len != scion_payload_len0 - total_ext_len)) {
 								// #if LOG_PACKETS
 								printf(
-									"[%d] Invalid SCION packet: invalid l4_payload_len in SCION packet authenticator option.\n",
+									"[%d] Invalid SCION packet: invalid l4_payload_len in SCION packet authenticator "
+									"option.\n",
 									lcore_id);
 								// #endif
 								return -1;
 							}
 #endif
+							// compute trailer length such that we get a multiple of 16 as data input size
 							uint16_t l4_payload_trl_len =
 								(16 - (sizeof scion_packet_authenticator_opt->l4_payload_len + l4_payload_len) % 16)
 								% 16;
-printf("@@@ l4_payload_trl_len = %d\n", l4_payload_trl_len);
+							if (l4_payload_trl_len != 0) {
+								void *p = rte_pktmbuf_append(m, l4_payload_trl_len);
+								RTE_ASSERT(p == (char *)(scion_packet_authenticator_opt + 1) + l4_payload_len);
+								(void)memset(p, 0, l4_payload_trl_len);
+							}
+
+							uint64_t src_ia = rte_be_to_cpu_64(scion_addr_hdr->src_ia);
+
+							struct timeval tv_now;
+							int r = get_time(lcore_id, &tv_now);
+							if (r != 0) {
+								RTE_ASSERT(r == -1);
+								return -1;
+							}
+
+							/* clang-format off */
+							r = check_authenticator(
+								lcore_id,
+								tv_now,
+								src_ia,
+								scion_addr_hdr->src_host_addr,
+								scion_addr_hdr->dst_host_addr,
+								&scion_packet_authenticator_opt->l4_payload_len,
+								sizeof scion_packet_authenticator_opt->l4_payload_len + l4_payload_len
+									+ l4_payload_trl_len,
+								scion_packet_authenticator_opt->l4_payload_chksum);
+							/* clang-format on */
+							if (r != 0) {
+								RTE_ASSERT(r == -1);
+								return 1;
+							}
+							auth_pkt = true;
+
+							if (l4_payload_trl_len != 0) {
+								r = rte_pktmbuf_trim(m, l4_payload_trl_len);
+								RTE_ASSERT(r == 0);
+							}
+
+							r = apply_duplicate_filter(
+								lcore_id, tv_now, scion_packet_authenticator_opt->l4_payload_chksum);
+							if (r != 0) {
+								RTE_ASSERT(r == -1);
+								return -1;
+							}
+
+							r = apply_auth_pkt_rate_limit_filter(lcore_id, state, src_ia, ipv4_total_length0);
+							if (r != 0) {
+								RTE_ASSERT(r == -1);
+								return -1;
+							}
 						}
 						i += 2 + opt_data_len;
 					}
@@ -957,8 +1210,12 @@ printf("@@@ l4_payload_trl_len = %d\n", l4_payload_trl_len);
 		}
 	}
 
+	if (!auth_pkt) {
+		apply_non_auth_pkt_rate_limit_filter(lcore_id, state, ipv4_total_length0);
+	}
+
 #if LOG_PACKETS
-	printf("[%d] @@@ Forwarding incoming packet:\n", lcore_id);
+	printf("[%d] Forwarding incoming packet:\n", lcore_id);
 	dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
 #endif
 	uint16_t n = rte_eth_tx_buffer(
@@ -974,8 +1231,7 @@ printf("@@@ l4_payload_trl_len = %d\n", l4_payload_trl_len);
 }
 
 static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hdr0,
-	const unsigned lcore_id, struct lcore_values *lvars)
-{
+	const unsigned lcore_id, struct lcore_values *lvars) {
 	RTE_ASSERT(sizeof *ether_hdr0 <= m->data_len);
 	RTE_ASSERT(ether_hdr0->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4));
 
@@ -991,7 +1247,8 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 	ipv4_hdr0 = (struct rte_ipv4_hdr *)(ether_hdr0 + 1);
 
 	if (ipv4_hdr0->next_proto_id == IP_PROTO_ID_UDP) {
-		uint16_t ipv4_hdr_length0 = (ipv4_hdr0->version_ihl & RTE_IPV4_HDR_IHL_MASK) * RTE_IPV4_IHL_MULTIPLIER;
+		uint16_t ipv4_hdr_length0 =
+			(ipv4_hdr0->version_ihl & RTE_IPV4_HDR_IHL_MASK) * RTE_IPV4_IHL_MULTIPLIER;
 
 		uint16_t ipv4_total_length0 = rte_be_to_cpu_16(ipv4_hdr0->total_length);
 
@@ -1000,7 +1257,7 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 			// #if LOG_PACKETS
 			printf("[%d] Invalid IP packet: header length too small.\n", lcore_id);
 			// #endif
-			return - 1;
+			return -1;
 		}
 #endif
 #if CHECK_PACKET_STRUCTURE
@@ -1021,8 +1278,7 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 #if CHECK_PACKET_STRUCTURE
 		if (unlikely(sizeof *udp_hdr > m->data_len - sizeof *ether_hdr0 - ipv4_hdr_length0)) {
 			// #if LOG_PACKETS
-			printf(
-				"[%d] Not yet implemented: UDP header exceeds first buffer segment.\n", lcore_id);
+			printf("[%d] Not yet implemented: UDP header exceeds first buffer segment.\n", lcore_id);
 			// #endif
 			return -1;
 		}
@@ -1031,15 +1287,13 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 
 		uint16_t udp_dst_port = rte_be_to_cpu_16(udp_hdr->dst_port);
 		if (((SCION_BR_DEFAULT_PORT_LO <= udp_dst_port) && (udp_dst_port <= SCION_BR_DEFAULT_PORT_HI))
-				|| (udp_dst_port == SCION_BR_TESTNET_PORT_0)
-				|| (udp_dst_port == SCION_BR_TESTNET_PORT_1))
+				|| (udp_dst_port == SCION_BR_TESTNET_PORT_0) || (udp_dst_port == SCION_BR_TESTNET_PORT_1))
 		{
 			uint16_t udp_dgram_length0 = rte_be_to_cpu_16(udp_hdr->dgram_len);
 #if CHECK_PACKET_STRUCTURE
 			if (unlikely(udp_dgram_length0 != ipv4_data_length0)) {
 				// #if LOG_PACKETS
-				printf(
-					"[%d] Invalid IP packet: total length inconsistent with UDP datagram length.\n",
+				printf("[%d] Invalid IP packet: total length inconsistent with UDP datagram length.\n",
 					lcore_id);
 				// #endif
 				return -1;
@@ -1048,8 +1302,7 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 #if CHECK_PACKET_STRUCTURE
 			if (unlikely(udp_dgram_length0 < sizeof *udp_hdr)) {
 				// #if LOG_PACKETS
-				printf(
-					"[%d] Invalid UDP packet: datagram length smaller than header length.\n", lcore_id);
+				printf("[%d] Invalid UDP packet: datagram length smaller than header length.\n", lcore_id);
 				// #endif
 				return -1;
 			}
@@ -1086,7 +1339,8 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 				if (unlikely(sizeof *scion_cmn_hdr > scion_cmn_hdr_len0)) {
 					// #if LOG_PACKETS
 					printf(
-						"[%d] Invalid SCION packet: common header length inconsistent with length of common header.\n",
+						"[%d] Invalid SCION packet: common header length inconsistent with length of common "
+						"header.\n",
 						lcore_id);
 					// #endif
 					return -1;
@@ -1095,7 +1349,10 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 
 				if (unlikely(scion_cmn_hdr->dt_dl_st_sl != 0)) {
 					// #if LOG_PACKETS
-					printf("[%d] Not yet implemented: SCION packet contains unsupported host-address types/lengths.\n", lcore_id);
+					printf(
+						"[%d] Not yet implemented: SCION packet contains unsupported host-address "
+						"types/lengths.\n",
+						lcore_id);
 					// #endif
 					return -1;
 				}
@@ -1181,8 +1438,7 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 
 				if (unlikely(next_hdr == SCION_PROTOCOL_E2E)) {
 					// #if LOG_PACKETS
-					printf("[%d] Not yet implemented: SCION packet already contains E2E header.\n",
-						lcore_id);
+					printf("[%d] Not yet implemented: SCION packet already contains E2E header.\n", lcore_id);
 					// #endif
 					return -1;
 				}
@@ -1223,8 +1479,8 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 
 				if (unlikely(ext_len > UINT16_MAX - ipv4_total_length0)) {
 					// #if LOG_PACKETS
-					printf("[%d] Not yet implemented: SCION packet too big to add extension header\n",
-						lcore_id);
+					printf(
+						"[%d] Not yet implemented: SCION packet too big to add extension header\n", lcore_id);
 					// #endif
 					return -1;
 				}
@@ -1271,8 +1527,7 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 				scion_packet_authenticator_opt->l4_payload_len = rte_cpu_to_be_16(l4_payload_len);
 
 				uint16_t l4_payload_trl_len =
-					(16 - (sizeof scion_packet_authenticator_opt->l4_payload_len + l4_payload_len) % 16)
-					% 16;
+					(16 - (sizeof scion_packet_authenticator_opt->l4_payload_len + l4_payload_len) % 16) % 16;
 
 				if (l4_payload_trl_len != 0) {
 					p = rte_pktmbuf_append(m, l4_payload_trl_len);
@@ -1282,17 +1537,13 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 
 				rte_be64_t src_ia = config.isd_as;
 
-				struct timeval tv;
-				int r = gettimeofday(&tv, NULL);
-				if (unlikely(r != 0)) {
+				struct timeval tv_now;
+				int r = get_time(lcore_id, &tv_now);
+				if (r != 0) {
 					RTE_ASSERT(r == -1);
-					// #if LOG_PACKETS
-					printf("[%d] Syscall gettimeofday failed.\n", lcore_id);
-					// #endif
 					return -1;
 				}
-				RTE_ASSERT((INT64_MIN <= tv.tv_sec) && (tv.tv_sec <= INT64_MAX));
-				int64_t t_now = tv.tv_sec;
+				int64_t t_now = tv_now.tv_sec;
 				struct key_dictionary *kd = key_dictionaries[lcore_id];
 				key_dictionary_find(kd, src_ia);
 				struct key_store_node *n = kd->value;
@@ -1315,18 +1566,18 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 				printf("[%d] }\n", lcore_id);
 #endif
 
-				compute_lf_chksum(lcore_id,
+				compute_chksum(lcore_id,
 					/* drkey: */ ds->key,
 					/* src_addr: */ scion_addr_hdr->src_host_addr,
 					/* dst_addr: */ scion_addr_hdr->dst_host_addr,
 					/* data: */ &scion_packet_authenticator_opt->l4_payload_len,
-					/* data_len: */ sizeof scion_packet_authenticator_opt->l4_payload_len
-						+ l4_payload_len + l4_payload_trl_len,
+					/* data_len: */ sizeof scion_packet_authenticator_opt->l4_payload_len + l4_payload_len
+						+ l4_payload_trl_len,
 					/* chksum: */ scion_packet_authenticator_opt->l4_payload_chksum,
 					/* rkey_buf: */ roundkey[lcore_id],
 					/* addr_buf: */ key_hosts_addrs[lcore_id]);
 				if (l4_payload_trl_len != 0) {
-					int r = rte_pktmbuf_trim(m, l4_payload_trl_len);
+					r = rte_pktmbuf_trim(m, l4_payload_trl_len);
 					RTE_ASSERT(r == 0);
 				}
 
@@ -1354,11 +1605,8 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 	return 0;
 }
 
-
 static void scionfwd_simple_scion_forward(
 	struct rte_mbuf *m, const unsigned lcore_id, struct lcore_values *lvars, int16_t state) {
-	(void)state;
-
 	struct rte_ether_hdr *l2_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 	if (l2_hdr->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
 		struct rte_ipv4_hdr *l3_hdr = (struct rte_ipv4_hdr *)(l2_hdr + 1);
@@ -1369,7 +1617,7 @@ static void scionfwd_simple_scion_forward(
 			rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
 			(void)rte_memcpy(&l2_hdr->s_addr, &tx_ether_addr, sizeof l2_hdr->s_addr);
 			(void)rte_memcpy(&l2_hdr->d_addr, &b.ether_addr, sizeof l2_hdr->d_addr);
-			r = handle_inbound_scion_pkt(m, l2_hdr, lcore_id, lvars);
+			r = handle_inbound_scion_pkt(m, l2_hdr, lcore_id, lvars, state);
 			if (r != 0) {
 				RTE_ASSERT(r == -1);
 				/* drop packet */
@@ -1406,7 +1654,7 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 	int16_t state) {
 	uint16_t ipv4_total_length0 = rte_be_to_cpu_16(ipv4_hdr0->total_length);
 
-	int lf_pkt = 0;
+	bool auth_pkt = false;
 
 	if (is_peer(ipv4_hdr0->src_addr) && (ipv4_hdr0->next_proto_id == IP_PROTO_ID_UDP)) {
 		uint16_t ipv4_hdr_length0 =
@@ -1442,8 +1690,6 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 
 		uint16_t dst_port = rte_be_to_cpu_16(udp_hdr->dst_port);
 		if ((LF_DEFAULT_PORT <= dst_port) && (dst_port < LF_DEFAULT_PORT + 128)) {
-			lf_pkt = 1;
-
 #if CHECK_PACKET_STRUCTURE
 			if (unlikely(ipv4_total_length0 != m->data_len - sizeof *ether_hdr0)) {
 				// #if LOG_PACKETS
@@ -1512,135 +1758,40 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 				RTE_ASSERT(p == (char *)(lf_hdr + 1) + encaps_pkt_len);
 				(void)memset(p, 0, encaps_trl_len);
 			}
-			unsigned char *chksum = computed_cmac[lcore_id];
 
 			struct timeval tv_now;
-			int r = gettimeofday(&tv_now, NULL);
-			if (unlikely(r != 0)) {
+			int r = get_time(lcore_id, &tv_now);
+			if (r != 0) {
 				RTE_ASSERT(r == -1);
-				// #if LOG_PACKETS
-				printf("[%d] Syscall gettimeofday failed.\n", lcore_id);
-				// #endif
 				return -1;
 			}
-			RTE_ASSERT((INT64_MIN <= tv_now.tv_sec) && (tv_now.tv_sec <= INT64_MAX));
-			int64_t t_now = tv_now.tv_sec;
 
-			struct key_dictionary *kd = key_dictionaries[lcore_id];
-			key_dictionary_find(kd, lf_hdr->src_ia);
-			struct key_store_node *n = kd->value;
-			if (unlikely(n == NULL)) {
-				// #if LOG_PACKETS
-				printf("[%d] Key store lookup failed.\n", lcore_id);
-				// #endif
-				return -1;
+			/* clang-format off */
+			r = check_authenticator(
+				lcore_id,
+				tv_now,
+				lf_hdr->src_ia,
+				ipv4_hdr_src_addr0,
+				backend_public_addr(ipv4_hdr_dst_addr0),
+				&lf_hdr->encaps_pkt_len,
+				sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len + encaps_trl_len,
+				lf_hdr->encaps_pkt_chksum);
+			/* clang-format on */
+			if (r != 0) {
+				RTE_ASSERT(r == -1);
+				return 1;
 			}
-			struct delegation_secret *ds = get_delegation_secret(n, t_now);
-			if (unlikely(ds == NULL)) {
-				// #if LOG_PACKETS
-				printf("[%d] Delegation secret lookup failed.\n", lcore_id);
-				// #endif
-				return -1;
-			}
-#if LOG_PACKETS
-			printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, lf_hdr->src_ia, t_now);
-			dump_hex(lcore_id, ds->key, 16);
-			printf("[%d] }\n", lcore_id);
-#endif
+			auth_pkt = true;
 
-			compute_lf_chksum(lcore_id,
-				/* drkey: */ ds->key,
-				/* src_addr: */ ipv4_hdr_src_addr0,
-				/* dst_addr: */ backend_public_addr(ipv4_hdr_dst_addr0),
-				/* data: */ &lf_hdr->encaps_pkt_len,
-				/* data_len: */ sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len + encaps_trl_len,
-				/* chksum: */ chksum,
-				/* rkey_buf: */ roundkey[lcore_id],
-				/* addr_buf: */ key_hosts_addrs[lcore_id]);
-			bool is_chksum_valid = crypto_cmp_16(lf_hdr->encaps_pkt_chksum, chksum) == 0;
-
-			if (unlikely(
-						!is_chksum_valid && (ds->validity_not_after - t_now < max_key_validity_extension))) {
-				// the current delegation secret has expired -> try again with the next delegation secret
-				ds = &n->key_store->delegation_secrets[NEXT_KEY_INDEX(n->key_index)];
-				if (ds->validity_not_before < ds->validity_not_after) {
-#if LOG_PACKETS
-					printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, lf_hdr->src_ia, t_now);
-					dump_hex(lcore_id, ds->key, 16);
-					printf("[%d] }\n", lcore_id);
-#endif
-					compute_lf_chksum(lcore_id,
-						/* drkey: */ ds->key,
-						/* src_addr: */ ipv4_hdr_src_addr0,
-						/* dst_addr: */ backend_public_addr(ipv4_hdr_dst_addr0),
-						/* data: */ &lf_hdr->encaps_pkt_len,
-						/* data_len: */ sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len + encaps_trl_len,
-						/* chksum: */ chksum,
-						/* rkey_buf: */ roundkey[lcore_id],
-						/* addr_buf: */ key_hosts_addrs[lcore_id]);
-					is_chksum_valid = crypto_cmp_16(lf_hdr->encaps_pkt_chksum, chksum) == 0;
-				}
-			}
-			if (unlikely(
-						!is_chksum_valid && (t_now - ds->validity_not_before < max_key_validity_extension))) {
-				// the current delegation secret is not valid yet -> try again with the previous delegation
-				// secret
-				ds = &n->key_store->delegation_secrets[PREV_KEY_INDEX(n->key_index)];
-				if (ds->validity_not_before < ds->validity_not_after) {
-#if LOG_PACKETS
-					printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, lf_hdr->src_ia, t_now);
-					dump_hex(lcore_id, ds->key, 16);
-					printf("[%d] }\n", lcore_id);
-#endif
-					compute_lf_chksum(lcore_id,
-						/* drkey: */ ds->key,
-						/* src_addr: */ ipv4_hdr_src_addr0,
-						/* dst_addr: */ backend_public_addr(ipv4_hdr_dst_addr0),
-						/* data: */ &lf_hdr->encaps_pkt_len,
-						/* data_len: */ sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len + encaps_trl_len,
-						/* chksum: */ chksum,
-						/* rkey_buf: */ roundkey[lcore_id],
-						/* addr_buf: */ key_hosts_addrs[lcore_id]);
-					is_chksum_valid = crypto_cmp_16(lf_hdr->encaps_pkt_chksum, chksum) == 0;
-				}
-			}
-			if (unlikely(!is_chksum_valid)) {
-				// #if LOG_PACKETS
-				printf("[%d] Invalid LF packet: checksum verification failed.\n", lcore_id);
-				// #endif
-				return -1;
-			}
 			if (encaps_trl_len != 0) {
-				int r = rte_pktmbuf_trim(m, encaps_trl_len);
+				r = rte_pktmbuf_trim(m, encaps_trl_len);
 				RTE_ASSERT(r == 0);
 			}
 
-			struct lcore_values *lcore_values = &core_vars[lcore_id];
-
-			// Periodically rotate and reset the bloom filters to avoid overcrowding
-			lcore_values->cur_ts = tv_now;
-			if ((lcore_values->cur_ts.tv_sec - lcore_values->last_ts.tv_sec) * 1000000
-						+ lcore_values->cur_ts.tv_usec - lcore_values->last_ts.tv_usec
-					> delta_us)
-			{
-				lcore_values->active_filter_id = (lcore_values->active_filter_id + 1) % MAX_BLOOM_FILTERS;
-				bloom_free(&lcore_values->bloom_filters[lcore_values->active_filter_id]);
-				bloom_init(&lcore_values->bloom_filters[lcore_values->active_filter_id], NUM_BLOOM_ENTRIES,
-					1.0 / BLOOM_ERROR_RATE);
-				lcore_values->last_ts = lcore_values->cur_ts;
-			}
-			int dup = sc_bloom_add(
-				lcore_values->bloom_filters, MAX_BLOOM_FILTERS, lcore_values->active_filter_id, chksum, 16);
-			if (dup != 0) {
-				lcore_values->stats.bloom_filter_hit_counter++;
-#if ENFORCE_DUPLICATE_FILTER
-				// #if LOG_PACKETS
-				printf("[%d] Duplicate LF packet.\n", lcore_id);
-				// #endif
+			r = apply_duplicate_filter(lcore_id, tv_now, lf_hdr->encaps_pkt_chksum);
+			if (r != 0) {
+				RTE_ASSERT(r == -1);
 				return -1;
-#endif
-			} else {
-				lcore_values->stats.bloom_filter_miss_counter++;
 			}
 
 			uint16_t encaps_hdr_len = ipv4_hdr_length0 + sizeof *udp_hdr + sizeof *lf_hdr;
@@ -1662,50 +1813,11 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 			uint16_t ipv4_total_length1 = rte_be_to_cpu_16(ipv4_hdr1->total_length);
 			RTE_ASSERT(ipv4_total_length1 == m->data_len - sizeof *ether_hdr1);
 
-#if ENFORCE_LF_RATE_LIMIT_FILTER
-			dictionary_flow *lcore_dict = dos_stats[lcore_id].dos_dictionary[state];
-			r = dic_find_flow(lcore_dict, lf_hdr->src_ia);
-			RTE_ASSERT(r == 1);
-
-			// Rate limit LF traffic
-			if (lcore_dict->value->secX_counter <= 0) {
-				if (lcore_dict->value->sc_counter <= 0) {
-					int64_t reserve = rte_atomic64_read(lcore_dict->value->reserve);
-					if (reserve <= 0) {
-						lcore_values->stats.as_rate_limited++;
-	#if LOG_PACKETS
-						printf("[%d] LF rate limit for %0lx exceeded.\n", lcore_id, lf_hdr->src_ia);
-	#endif
-						return -1;
-					} else {
-						rte_atomic64_sub(lcore_dict->value->reserve, ipv4_total_length1);
-					}
-				} else {
-					lcore_dict->value->sc_counter -= ipv4_total_length1;
-				}
-			} else {
-				lcore_dict->value->secX_counter -= ipv4_total_length1;
+			r = apply_auth_pkt_rate_limit_filter(lcore_id, state, lf_hdr->src_ia, ipv4_total_length1);
+			if (r != 0) {
+				RTE_ASSERT(r == -1);
+				return -1;
 			}
-			// Check then for overall rate
-			if (dos_stats[lcore_id].secX_dos_packet_count[state] <= 0) {
-				if (dos_stats[lcore_id].sc_dos_packet_count[state] <= 0) {
-					int64_t reserve = rte_atomic64_read(dos_stats[lcore_id].reserve[state]);
-					if (reserve <= 0) {
-						lcore_values->stats.rate_limited++;
-	#if LOG_PACKETS
-						printf("[%d] LF overall rate limit for %0lx exceeded.\n", lcore_id, lf_hdr->src_ia);
-	#endif
-						return -1;
-					} else {
-						rte_atomic64_sub(dos_stats[lcore_id].reserve[state], ipv4_total_length1);
-					}
-				} else {
-					dos_stats[lcore_id].sc_dos_packet_count[state] -= ipv4_total_length1;
-				}
-			} else {
-				dos_stats[lcore_id].secX_dos_packet_count[state] -= ipv4_total_length1;
-			}
-#endif
 
 			ipv4_hdr1->hdr_checksum = 0;
 			ipv4_hdr1->src_addr = ipv4_hdr_src_addr0;
@@ -1731,33 +1843,8 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 		}
 	}
 
-	if (lf_pkt == 0) {
-		struct lcore_values *lcore_values = &core_vars[lcore_id];
-		dictionary_flow *lcore_dict = dos_stats[lcore_id].dos_dictionary[state];
-
-		int r = dic_find_flow(lcore_dict, 0);
-		RTE_ASSERT(r == 1);
-
-		// Rate limit non-LF traffic
-		if (lcore_dict->value->sc_counter <= 0) {
-			lcore_values->stats.as_rate_limited++;
-#if LOG_PACKETS
-			printf("[%d] Non-LF rate limit exceeded.\n", lcore_id);
-#endif
-			return -1;
-		} else {
-			lcore_dict->value->sc_counter -= ipv4_total_length0;
-		}
-		// Check then for overall rate
-		if (dos_stats[lcore_id].sc_dos_packet_count[state] <= 0) {
-			lcore_values->stats.rate_limited++;
-#if LOG_PACKETS
-			printf("[%d] Non-LF overall rate limit exceeded.\n", lcore_id);
-#endif
-			return -1;
-		} else {
-			dos_stats[lcore_id].sc_dos_packet_count[state] -= ipv4_total_length0;
-		}
+	if (!auth_pkt) {
+		apply_non_auth_pkt_rate_limit_filter(lcore_id, state, ipv4_total_length0);
 	}
 
 #if !UNIDIRECTIONAL_SETUP
@@ -1869,17 +1956,13 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 			RTE_ASSERT(p == (char *)(lf_hdr + 1) + ipv4_total_length0);
 			(void)memset(p, 0, encaps_trl_len);
 		}
-		struct timeval tv;
-		int r = gettimeofday(&tv, NULL);
-		if (unlikely(r != 0)) {
+		struct timeval tv_now;
+		int r = get_time(lcore_id, &tv_now);
+		if (r != 0) {
 			RTE_ASSERT(r == -1);
-			// #if LOG_PACKETS
-			printf("[%d] Syscall gettimeofday failed.\n", lcore_id);
-			// #endif
 			return -1;
 		}
-		RTE_ASSERT((INT64_MIN <= tv.tv_sec) && (tv.tv_sec <= INT64_MAX));
-		int64_t t_now = tv.tv_sec;
+		int64_t t_now = tv_now.tv_sec;
 		struct key_dictionary *kd = key_dictionaries[lcore_id];
 		key_dictionary_find(kd, src_ia);
 		struct key_store_node *n = kd->value;
@@ -1901,7 +1984,7 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 		dump_hex(lcore_id, ds->key, 16);
 		printf("[%d] }\n", lcore_id);
 #endif
-		compute_lf_chksum(lcore_id,
+		compute_chksum(lcore_id,
 			/* drkey: */ ds->key,
 			/* src_addr: */ backend_public_addr(ipv4_hdr_src_addr0),
 			/* dst_addr: */ ipv4_hdr_dst_addr0,
@@ -1911,7 +1994,7 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 			/* rkey_buf: */ roundkey[lcore_id],
 			/* addr_buf: */ key_hosts_addrs[lcore_id]);
 		if (encaps_trl_len != 0) {
-			int r = rte_pktmbuf_trim(m, encaps_trl_len);
+			r = rte_pktmbuf_trim(m, encaps_trl_len);
 			RTE_ASSERT(r == 0);
 		}
 
