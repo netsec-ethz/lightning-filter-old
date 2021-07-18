@@ -10,7 +10,7 @@ connection = "gen-cache/sd1-ff00_0_112.trust.db"
 connection = "gen-cache/sd1-ff00_0_112.path.db"
 
 [sd]
-address = "10.248.4.1:30255"
+address = "10.248.8.1:30255"
 
 [tracing]
 enabled = true
