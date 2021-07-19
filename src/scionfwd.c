@@ -2821,11 +2821,10 @@ static int fetch_delegation_secret(
 	uint64_t src_ia, uint64_t dst_ia, int64_t val_time, struct delegation_secret *ds) {
 	int r;
 #if ENABLE_KEY_MANAGEMENT
-	char sciondAddr[] = "127.0.0.1:30255";
 	memset(ds, 0, sizeof *ds);
 	RTE_ASSERT(sizeof ds->validity_not_before == sizeof(GoInt64));
 	RTE_ASSERT(sizeof ds->validity_not_after == sizeof(GoInt64));
-	r = GetDelegationSecret(sciondAddr, src_ia, dst_ia, val_time, (GoInt64 *)&ds->validity_not_before,
+	r = GetDelegationSecret(sciond_addr, src_ia, dst_ia, val_time, (GoInt64 *)&ds->validity_not_before,
 		(GoInt64 *)&ds->validity_not_after, ds->key);
 	if (r != 0) {
 		RTE_ASSERT(r == -1);
