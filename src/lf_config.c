@@ -266,7 +266,7 @@ static void reader_read_ether_addr(struct reader *rd, uint8_t val[6]) {
 	assert(addrstr[i] == '\0');
 }
 
-static void reader_read_ipv4_addr(struct reader *rd, int32_t *val) {
+static void reader_read_ipv4_addr(struct reader *rd, uint32_t *val) {
 	reader_skip_forward(rd);
 	if (rd->state == READER_STATE_ERROR) {
 		return;
@@ -359,7 +359,7 @@ static int32_t get_as_num_part(char *str, size_t length) {
 	return as_num_part;
 }
 
-static void reader_read_isd_as(struct reader *rd, int64_t *val) {
+static void reader_read_isd_as(struct reader *rd, uint64_t *val) {
 	reader_skip_forward(rd);
 	if (rd->state == READER_STATE_ERROR) {
 		return;
@@ -388,13 +388,14 @@ static void reader_read_isd_as(struct reader *rd, int64_t *val) {
 	while ((iastr[j] != '\0') && (iastr[j] != ':')) {
 		j++;
 	}
-	int64_t as;
+	uint64_t as;
 	if (iastr[j] == '\0') {
-		as = get_bgp_as_num(&iastr[i], j - i);
-		if (as < 0) {
+		int64_t as0 = get_bgp_as_num(&iastr[i], j - i);
+		if (as0 < 0) {
 			rd->state = READER_STATE_ERROR;
 			return;
 		}
+		as = (uint64_t)as0;
 	} else {
 		int64_t as0 = get_as_num_part(&iastr[i], j - i);
 		if (as0 < 0) {
@@ -425,9 +426,9 @@ static void reader_read_isd_as(struct reader *rd, int64_t *val) {
 			rd->state = READER_STATE_ERROR;
 			return;
 		}
-		as = (as0 << 32) | (as1 << 16) | as2;
+		as = ((uint64_t)as0 << 32) | ((uint64_t)as1 << 16) | (uint64_t)as2;
 	}
-	*val = (isd << 48) | as;
+	*val = ((uint64_t)isd << 48) | (uint64_t)as;
 }
 
 static void reader_read_rate_limit(struct reader *rd, uint64_t *val) {
@@ -464,8 +465,8 @@ static void reader_read_backends(struct reader *rd, struct lf_config *c) {
 			rd->state = READER_STATE_ERROR;
 			return;
 		}
-		int32_t public_addr = 0;
-		int32_t private_addr = 0;
+		uint32_t public_addr = 0;
+		uint32_t private_addr = 0;
 		uint8_t ether_addr[6] = {0x0, 0x0, 0x0, 0x0, 0x0, 0x0};
 		do {
 			char selector[256];
@@ -552,8 +553,8 @@ static void reader_read_peers(struct reader *rd, struct lf_config *c) {
 			rd->state = READER_STATE_ERROR;
 			return;
 		}
-		int64_t isd_as = 0;
-		int32_t public_addr = 0;
+		uint64_t isd_as = 0;
+		uint32_t public_addr = 0;
 		uint64_t rate_limit = 0;
 		uint8_t ether_addr[6] = {0x0, 0x0, 0x0, 0x0, 0x0, 0x0};
 		do {

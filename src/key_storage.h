@@ -3,14 +3,8 @@
 
 #include <rte_memory.h>
 
-#define DEFAULT_KEY_VALIDITY (30)
-#define DEFAULT_KEY_VALIDITY_EXTENSION (3)
-
 #define NEXT_KEY_INDEX(x) (((x) + 1) % 3)
 #define PREV_KEY_INDEX(x) (((x) + 2) % 3)
-
-int64_t min_key_validity;
-int64_t max_key_validity_extension;
 
 struct delegation_secret {
 	int64_t validity_not_before;

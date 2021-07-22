@@ -162,6 +162,9 @@ static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
 #define BLOCK_SIZE 16
 #define IV_SIZE 16
 
+#define DEFAULT_KEY_VALIDITY (30)
+#define DEFAULT_KEY_VALIDITY_EXTENSION (3)
+
 /**
  * SCION Headers
  */
@@ -188,8 +191,8 @@ struct scion_cmn_hdr {
 struct scion_addr_hdr {
 	uint64_t dst_ia;
 	uint64_t src_ia;
-	int32_t dst_host_addr;
-	int32_t src_host_addr;
+	uint32_t dst_host_addr;
+	uint32_t src_host_addr;
 } __attribute__((__packed__));
 
 struct scion_ext_hdr {
@@ -374,7 +377,10 @@ bool is_in_use[RTE_MAX_LCORE];
 // key manager
 uint32_t key_manager_core_id; /* cpu_id of the key manager core */
 struct key_dictionary
-	*key_dictionaries[RTE_MAX_LCORE]; /* holds pointer to the key dictionary of each core */
+	*inbound_key_dictionaries[RTE_MAX_LCORE]; /* holds pointer to the key dictionary of each core */
+struct key_dictionary
+	*outbound_key_dictionaries[RTE_MAX_LCORE]; /* holds pointer to the key dictionary of each core */
+int64_t max_key_validity_extension;
 
 // used to store key struct, roundkeys, computed CMAC and packet CMAC
 // in CMAC computation. Memory allocation at main loop start
@@ -518,7 +524,7 @@ static void swap_eth_addrs(struct rte_mbuf *m) {
 
 static int find_backend(rte_be32_t private_addr, struct lf_config_backend *b) {
 	struct lf_config_backend *x = config.backends;
-	while ((x != NULL) && (x->private_addr != (int32_t)private_addr)) {
+	while ((x != NULL) && (x->private_addr != private_addr)) {
 		x = x->next;
 	}
 	if (x != NULL) {
@@ -533,7 +539,7 @@ static int find_backend(rte_be32_t private_addr, struct lf_config_backend *b) {
 
 static int find_peer(rte_be32_t public_addr, struct lf_config_peer *p) {
 	struct lf_config_peer *x = config.peers;
-	while ((x != NULL) && (x->public_addr != (int32_t)public_addr)) {
+	while ((x != NULL) && (x->public_addr != public_addr)) {
 		x = x->next;
 	}
 	if (x != NULL) {
@@ -635,7 +641,7 @@ static void compute_chksum(unsigned lcore_id, unsigned char drkey[BLOCK_SIZE], r
 static int check_authenticator(unsigned lcore_id, struct timeval tv_now, uint64_t src_ia,
 	rte_be32_t src_addr, rte_be32_t dst_addr, void *data, size_t data_len, unsigned char *chksum) {
 	int64_t t_now = tv_now.tv_sec;
-	struct key_dictionary *kd = key_dictionaries[lcore_id];
+	struct key_dictionary *kd = inbound_key_dictionaries[lcore_id];
 	key_dictionary_find(kd, src_ia);
 	struct key_store_node *n = kd->value;
 	if (unlikely(n == NULL)) {
@@ -1535,7 +1541,7 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 					(void)memset(p, 0, l4_payload_trl_len);
 				}
 
-				rte_be64_t src_ia = config.isd_as;
+				uint64_t dst_ia = rte_be_to_cpu_64(scion_addr_hdr->dst_ia);
 
 				struct timeval tv_now;
 				int r = get_time(lcore_id, &tv_now);
@@ -1544,8 +1550,9 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 					return -1;
 				}
 				int64_t t_now = tv_now.tv_sec;
-				struct key_dictionary *kd = key_dictionaries[lcore_id];
-				key_dictionary_find(kd, src_ia);
+
+				struct key_dictionary *kd = outbound_key_dictionaries[lcore_id];
+				key_dictionary_find(kd, dst_ia);
 				struct key_store_node *n = kd->value;
 				if (n == NULL) {
 					// #if LOG_PACKETS
@@ -1561,7 +1568,7 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 					return -1;
 				}
 #if LOG_PACKETS
-				printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, src_ia, t_now);
+				printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, dst_ia, t_now);
 				dump_hex(lcore_id, ds->key, 16);
 				printf("[%d] }\n", lcore_id);
 #endif
@@ -1869,7 +1876,9 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 
 static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hdr0,
 	struct rte_ipv4_hdr *ipv4_hdr0, const unsigned lcore_id, struct lcore_values *lvars) {
-	if (is_peer(ipv4_hdr0->dst_addr)) {
+	struct lf_config_peer peer;
+	int r = find_peer(ipv4_hdr0->dst_addr, &peer);
+	if (r) {
 		uint16_t ipv4_total_length0 = rte_be_to_cpu_16(ipv4_hdr0->total_length);
 
 		if (unlikely(ipv4_total_length0 != m->data_len - sizeof *ether_hdr0)) {
@@ -1956,15 +1965,18 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 			RTE_ASSERT(p == (char *)(lf_hdr + 1) + ipv4_total_length0);
 			(void)memset(p, 0, encaps_trl_len);
 		}
+
+		int64_t dst_ia = peer.isd_as;
+
 		struct timeval tv_now;
-		int r = get_time(lcore_id, &tv_now);
+		r = get_time(lcore_id, &tv_now);
 		if (r != 0) {
 			RTE_ASSERT(r == -1);
 			return -1;
 		}
 		int64_t t_now = tv_now.tv_sec;
-		struct key_dictionary *kd = key_dictionaries[lcore_id];
-		key_dictionary_find(kd, src_ia);
+		struct key_dictionary *kd = outbound_key_dictionaries[lcore_id];
+		key_dictionary_find(kd, dst_ia);
 		struct key_store_node *n = kd->value;
 		if (n == NULL) {
 			// #if LOG_PACKETS
@@ -1980,7 +1992,7 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 			return -1;
 		}
 #if LOG_PACKETS
-		printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, src_ia, t_now);
+		printf("[%d] DRKey for %0lx at %ld: {\n", lcore_id, dst_ia, t_now);
 		dump_hex(lcore_id, ds->key, 16);
 		printf("[%d] }\n", lcore_id);
 #endif
@@ -2535,24 +2547,6 @@ static void metrics_main_loop(void) {
 			total_as_rate_limited_counter = 0;
 			total_rate_limited_counter = 0;
 
-			// collect for each AS the key-store information
-			struct key_dictionary *d = key_dictionaries[key_manager_core_id];
-
-			for (size_t i = 0; i < d->size; i++) {
-				if (d->table[i] != NULL) {
-					struct key_dictionary_node *n = d->table[i];
-					while (n != NULL) {
-						struct delegation_secret *ds =
-							&n->value->key_store->delegation_secrets[n->value->key_index];
-						snprintf(buffer, sizeof buffer,
-							"key_stats;%" PRIu64 ";%" PRIi64 ";%" PRIi64 ";%" PRIi64 ";%" PRIi64 ";fin\n", n->key,
-							ds->validity_not_before, ds->validity_not_after, min_key_validity,
-							max_key_validity_extension);
-						send(s, buffer, strlen(buffer), 0);
-						n = n->next;
-					}
-				}
-			}
 			close(s);
 
 #if ENABLE_MEASUREMENTS
@@ -2738,27 +2732,53 @@ static void metrics_main_loop(void) {
  * https://github.com/scionproto/scion/blob/master/doc/cryptography/DRKeyInfra.md
  */
 
-static void add_key_store_nodes(uint64_t src_ia) {
-	struct key_store *key_store = malloc(sizeof *key_store);
-	if (key_store == NULL) {
+static struct key_dictionary *new_key_dictionary(void) {
+	struct key_dictionary *d = key_dictionary_new(DEFAULT_KEY_DICTIONARY_SIZE);
+	if (d == NULL) {
+		rte_exit(EXIT_FAILURE, "Allocation of key dictionary failed.\n");
+	}
+	return d;
+}
+
+static struct key_store *new_key_store(void) {
+	struct key_store *s = malloc(sizeof *s);
+	if (s == NULL) {
 		rte_exit(EXIT_FAILURE, "Allocation of key store failed.\n");
 	}
-	memset(key_store, 0, sizeof *key_store);
+	memset(s, 0, sizeof *s);
+	return s;
+}
+
+static struct key_store_node *new_key_store_node(struct key_store *s) {
+	struct key_store_node *n = malloc(sizeof *n);
+	if (n == NULL) {
+		rte_exit(EXIT_FAILURE, "Allocation of key store node failed.\n");
+	}
+	n->key_index = 0;
+	n->key_store = s;
+	return n;
+}
+
+static void add_new_key_dictionary_entry(
+	struct key_dictionary *d, struct key_store *s, uint64_t key) {
+	int r = key_dictionary_add(d, key, new_key_store_node(s));
+	if (r == -1) {
+		rte_exit(EXIT_FAILURE, "Registration of key store node failed.\n");
+	}
+	RTE_ASSERT(r == 0);
+}
+
+static void add_key_dictionary_entries(uint64_t peer_ia) {
+	struct key_store *inbound_key_store = new_key_store();
+	struct key_store *outbound_key_store = new_key_store();
 	for (size_t core_id = 0; core_id < RTE_MAX_LCORE; core_id++) {
 		if (!is_in_use[core_id]) {
 			continue;
 		}
-		struct key_store_node *n = malloc(sizeof *n);
-		if (n == NULL) {
-			rte_exit(EXIT_FAILURE, "Allocation of key store node failed.\n");
-		}
-		n->key_index = 0;
-		n->key_store = key_store;
-		int r = key_dictionary_add(key_dictionaries[core_id], src_ia, n);
-		if (r == -1) {
-			rte_exit(EXIT_FAILURE, "Registration of key store node failed.\n");
-		}
-		RTE_ASSERT(r == 0);
+		RTE_ASSERT(core_id < sizeof inbound_key_dictionaries / sizeof inbound_key_dictionaries[0]);
+		add_new_key_dictionary_entry(inbound_key_dictionaries[core_id], inbound_key_store, peer_ia);
+		RTE_ASSERT(core_id < sizeof outbound_key_dictionaries / sizeof outbound_key_dictionaries[0]);
+		add_new_key_dictionary_entry(outbound_key_dictionaries[core_id], outbound_key_store, peer_ia);
 	}
 }
 
@@ -2768,22 +2788,14 @@ static void init_key_manager(void) {
 		if (!is_in_use[core_id]) {
 			continue;
 		}
-		struct key_dictionary *d = key_dictionary_new(DEFAULT_KEY_DICTIONARY_SIZE);
-		if (d == NULL) {
-			rte_exit(EXIT_FAILURE, "Allocation of key dictionary failed.\n");
-		}
-		RTE_ASSERT(core_id < sizeof key_dictionaries / sizeof key_dictionaries[0]);
-		key_dictionaries[core_id] = d;
+		RTE_ASSERT(core_id < sizeof inbound_key_dictionaries / sizeof inbound_key_dictionaries[0]);
+		inbound_key_dictionaries[core_id] = new_key_dictionary();
+		RTE_ASSERT(core_id < sizeof outbound_key_dictionaries / sizeof outbound_key_dictionaries[0]);
+		outbound_key_dictionaries[core_id] = new_key_dictionary();
 	}
-
 	for (struct lf_config_peer *p = config.peers; p != NULL; p = p->next) {
-		add_key_store_nodes(p->isd_as);
+		add_key_dictionary_entries(p->isd_as);
 	}
-	if (config.backends != NULL) {
-		add_key_store_nodes(config.isd_as);
-	}
-
-	min_key_validity = DEFAULT_KEY_VALIDITY;
 }
 
 #if LOG_DELEGATION_SECRETS
@@ -2824,8 +2836,8 @@ static int fetch_delegation_secret(
 	memset(ds, 0, sizeof *ds);
 	RTE_ASSERT(sizeof ds->validity_not_before == sizeof(GoInt64));
 	RTE_ASSERT(sizeof ds->validity_not_after == sizeof(GoInt64));
-	r = GetDelegationSecret(sciond_addr, src_ia, dst_ia, val_time, (GoInt64 *)&ds->validity_not_before,
-		(GoInt64 *)&ds->validity_not_after, ds->key);
+	r = GetDelegationSecret(sciond_addr, src_ia, dst_ia, val_time,
+		(GoInt64 *)&ds->validity_not_before, (GoInt64 *)&ds->validity_not_after, ds->key);
 	if (r != 0) {
 		RTE_ASSERT(r == -1);
 		usleep(500 * 1000);
@@ -2856,8 +2868,8 @@ static int fetch_delegation_secret(
 	return r;
 }
 
-static void fetch_delegation_secrets(
-	struct key_store_node *n, uint64_t src_ia, uint64_t dst_ia, int64_t val_time) {
+static void fetch_delegation_secrets(struct key_store_node *n, uint64_t src_ia, uint64_t dst_ia,
+	int64_t val_time, int64_t *min_key_validity) {
 	struct key_store *s = n->key_store;
 	RTE_ASSERT(sizeof s->delegation_secrets / sizeof s->delegation_secrets[0] == 3);
 	struct delegation_secret ds;
@@ -2866,8 +2878,8 @@ static void fetch_delegation_secrets(
 		RTE_ASSERT(ds.validity_not_before < ds.validity_not_after);
 		s->delegation_secrets[0] = ds;
 		int64_t key_validity = ds.validity_not_after - ds.validity_not_before;
-		if (key_validity < min_key_validity) {
-			min_key_validity = key_validity;
+		if (key_validity < *min_key_validity) {
+			*min_key_validity = key_validity;
 		}
 		if (ds.validity_not_after != INT64_MAX) {
 			struct delegation_secret next;
@@ -2876,8 +2888,8 @@ static void fetch_delegation_secrets(
 				RTE_ASSERT(next.validity_not_before < next.validity_not_after);
 				s->delegation_secrets[1] = next;
 				key_validity = next.validity_not_after - next.validity_not_before;
-				if (key_validity < min_key_validity) {
-					min_key_validity = key_validity;
+				if (key_validity < *min_key_validity) {
+					*min_key_validity = key_validity;
 				}
 			}
 		}
@@ -2888,8 +2900,8 @@ static void fetch_delegation_secrets(
 				// RTE_ASSERT(prev.validity_not_before < prev.validity_not_after);
 				s->delegation_secrets[2] = prev;
 				key_validity = prev.validity_not_after - prev.validity_not_before;
-				if (key_validity < min_key_validity) {
-					min_key_validity = key_validity;
+				if (key_validity < *min_key_validity) {
+					*min_key_validity = key_validity;
 				}
 			}
 		}
@@ -2897,7 +2909,7 @@ static void fetch_delegation_secrets(
 }
 
 static void check_adjacent_delegation_secrets(
-	struct key_store_node *n, uint64_t src_ia, uint64_t dst_ia) {
+	struct key_store_node *n, uint64_t src_ia, uint64_t dst_ia, int64_t *min_key_validity) {
 	struct key_store *s = n->key_store;
 	RTE_ASSERT(sizeof s->delegation_secrets / sizeof s->delegation_secrets[0] == 3);
 	struct delegation_secret *ds = &s->delegation_secrets[n->key_index];
@@ -2914,8 +2926,8 @@ static void check_adjacent_delegation_secrets(
 				RTE_ASSERT(next.validity_not_before < next.validity_not_after);
 				*next_ds = next;
 				int64_t key_validity = next.validity_not_after - next.validity_not_before;
-				if (key_validity < min_key_validity) {
-					min_key_validity = key_validity;
+				if (key_validity < *min_key_validity) {
+					*min_key_validity = key_validity;
 				}
 			}
 		}
@@ -2932,9 +2944,49 @@ static void check_adjacent_delegation_secrets(
 				// RTE_ASSERT(prev.validity_not_before < prev.validity_not_after);
 				*prev_ds = prev;
 				int64_t key_validity = prev.validity_not_after - prev.validity_not_before;
-				if (key_validity < min_key_validity) {
-					min_key_validity = key_validity;
+				if (key_validity < *min_key_validity) {
+					*min_key_validity = key_validity;
 				}
+			}
+		}
+	}
+}
+
+static void manage_inbound_delegation_secrets(
+	struct key_dictionary *d, int64_t t_now, int64_t *min_key_validity) {
+	RTE_ASSERT(config.isd_as != 0);
+	RTE_ASSERT(d->table != NULL);
+	for (size_t i = 0; i < d->size; i++) {
+		if (d->table[i] != NULL) {
+			struct key_dictionary_node *n = d->table[i];
+			while ((n != NULL) && (n->key !=0)) {
+				struct delegation_secret *ds = get_delegation_secret(n->value, t_now);
+				if (ds == NULL) {
+					fetch_delegation_secrets(n->value, config.isd_as, n->key, t_now, min_key_validity);
+				} else {
+					check_adjacent_delegation_secrets(n->value, config.isd_as, n->key, min_key_validity);
+				}
+				n = n->next;
+			}
+		}
+	}
+}
+
+static void manage_outbound_delegation_secrets(
+	struct key_dictionary *d, int64_t t_now, int64_t *min_key_validity) {
+	RTE_ASSERT(config.isd_as != 0);
+	RTE_ASSERT(d->table != NULL);
+	for (size_t i = 0; i < d->size; i++) {
+		if (d->table[i] != NULL) {
+			struct key_dictionary_node *n = d->table[i];
+			while ((n != NULL) && (n->key !=0)) {
+				struct delegation_secret *ds = get_delegation_secret(n->value, t_now);
+				if (ds == NULL) {
+					fetch_delegation_secrets(n->value, n->key, config.isd_as, t_now, min_key_validity);
+				} else {
+					check_adjacent_delegation_secrets(n->value, n->key, config.isd_as, min_key_validity);
+				}
+				n = n->next;
 			}
 		}
 	}
@@ -2942,10 +2994,7 @@ static void check_adjacent_delegation_secrets(
 
 static void key_manager_main_loop(void) {
 	printf("KEY MANAGER HAS STARTED\n");
-	RTE_ASSERT(key_manager_core_id < sizeof key_dictionaries / sizeof key_dictionaries[0]);
-	struct key_dictionary *d = key_dictionaries[key_manager_core_id];
-	RTE_ASSERT(d != NULL);
-	RTE_ASSERT(d->table != NULL);
+	int64_t min_key_validity = DEFAULT_KEY_VALIDITY;
 	int64_t i = 0;
 	while (!force_quit) {
 		if (i == 0) {
@@ -2957,20 +3006,14 @@ static void key_manager_main_loop(void) {
 			}
 			RTE_ASSERT((INT64_MIN <= tv.tv_sec) && (tv.tv_sec <= INT64_MAX));
 			int64_t t_now = tv.tv_sec;
-			for (size_t j = 0; j < d->size; j++) {
-				if (d->table[j] != NULL) {
-					struct key_dictionary_node *n = d->table[j];
-					while (n != NULL) {
-						struct delegation_secret *ds = get_delegation_secret(n->value, t_now);
-						if (ds == NULL) {
-							fetch_delegation_secrets(n->value, n->key, config.isd_as, t_now);
-						} else {
-							check_adjacent_delegation_secrets(n->value, n->key, config.isd_as);
-						}
-						n = n->next;
-					}
-				}
-			}
+			RTE_ASSERT(
+				key_manager_core_id < sizeof inbound_key_dictionaries / sizeof inbound_key_dictionaries[0]);
+			manage_inbound_delegation_secrets(
+				inbound_key_dictionaries[key_manager_core_id], t_now, &min_key_validity);
+			RTE_ASSERT(key_manager_core_id
+								 < sizeof outbound_key_dictionaries / sizeof outbound_key_dictionaries[0]);
+			manage_outbound_delegation_secrets(
+				outbound_key_dictionaries[key_manager_core_id], t_now, &min_key_validity);
 		}
 		sleep(1);
 		RTE_ASSERT(min_key_validity > 0);
