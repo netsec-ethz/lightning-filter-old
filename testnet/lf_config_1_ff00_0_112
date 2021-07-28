@@ -15,10 +15,12 @@
 	],
 	"backends": [
 		{
+			"public_addr": "10.248.5.2",
 			"private_addr": "10.248.5.2",
 			"ether_addr": "00:76:65:74:68:38"
 		},
 		{
+			"public_addr": "10.248.6.1",
 			"private_addr": "10.248.6.1",
 			"ether_addr": "00:76:65:74:68:38"
 		}

@@ -1163,7 +1163,7 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 							/* clang-format on */
 							if (r != 0) {
 								RTE_ASSERT(r == -1);
-								return 1;
+								return -1;
 							}
 							auth_pkt = true;
 
@@ -1581,10 +1581,17 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 #if DEPLOYMENT_AWS
 	swap_eth_addrs(m);
 #elif !DEPLOYMENT_UNIDIRECTIONAL
-	struct rte_ether_addr tx_ether_addr;
-	rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
-	(void)rte_memcpy(&ether_hdr0->s_addr, &tx_ether_addr, sizeof ether_hdr0->s_addr);
-	(void)rte_memcpy(&ether_hdr0->d_addr, &peer.ether_addr, sizeof ether_hdr0->d_addr);
+	if (is_peer) {
+		struct rte_ether_addr tx_ether_addr;
+		rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
+		(void)rte_memcpy(&ether_hdr0->s_addr, &tx_ether_addr, sizeof ether_hdr0->s_addr);
+		(void)rte_memcpy(&ether_hdr0->d_addr, &peer.ether_addr, sizeof ether_hdr0->d_addr);
+	} else {
+		// #if LOG_PACKETS
+		printf("[%d] Peer ethernet address lookup failed.\n", lcore_id);
+		// #endif
+		return -1;
+	}
 #endif
 
 #if LOG_PACKETS
@@ -1739,7 +1746,7 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 			/* clang-format on */
 			if (r != 0) {
 				RTE_ASSERT(r == -1);
-				return 1;
+				return -1;
 			}
 			auth_pkt = true;
 
@@ -1785,22 +1792,28 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 
 			m->l2_len = sizeof *ether_hdr1;
 			m->l3_len = sizeof *ipv4_hdr1;
+
+			uint64_t ol_flags = m->ol_flags;
 			m->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM;
 
 			if (ipv4_hdr1->next_proto_id == IP_PROTO_ID_UDP) {
 				struct rte_udp_hdr *udp_hdr;
 				RTE_ASSERT(sizeof *udp_hdr <= m->data_len - sizeof *ether_hdr1 - sizeof *ipv4_hdr1);
 				udp_hdr = (struct rte_udp_hdr *)(ipv4_hdr1 + 1);
-				udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, /* ol_flags: */ 0);
-				m->ol_flags |= PKT_TX_UDP_CKSUM;
+				ol_flags |= PKT_TX_UDP_CKSUM;
+				m->l4_len = sizeof *udp_hdr;
+				m->ol_flags = ol_flags;
+				udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, ol_flags);
 			} else if (ipv4_hdr1->next_proto_id == IP_PROTO_ID_TCP) {
 				struct rte_tcp_hdr *tcp_hdr;
 				RTE_ASSERT(sizeof *tcp_hdr <= m->data_len - sizeof *ether_hdr1 - sizeof *ipv4_hdr1);
 				tcp_hdr = (struct rte_tcp_hdr *)(ipv4_hdr1 + 1);
-				tcp_hdr->cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, /* ol_flags: */ 0);
-				m->ol_flags |= PKT_TX_TCP_CKSUM;
+				ol_flags |= PKT_TX_TCP_CKSUM;
+				m->l4_len = sizeof *tcp_hdr;
+				m->ol_flags = ol_flags;
+				tcp_hdr->cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, ol_flags);
 			}
-
+			
 			ether_hdr0 = ether_hdr1;
 		}
 	}
@@ -1904,6 +1917,9 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 
 		RTE_ASSERT(p == (char *)ether_hdr1);
 
+		uint64_t ol_flags = m->ol_flags;
+		ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
+
 		ipv4_hdr1 = (struct rte_ipv4_hdr *)(ether_hdr1 + 1);
 		ipv4_hdr1->version_ihl = (IPV4_VERSION << 4) | (sizeof *ipv4_hdr1) / RTE_IPV4_IHL_MULTIPLIER;
 		ipv4_hdr1->type_of_service = 0;
@@ -1920,7 +1936,7 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 		udp_hdr->src_port = rte_cpu_to_be_16(LF_DEFAULT_PORT + lcore_id);
 		udp_hdr->dst_port = rte_cpu_to_be_16(LF_DEFAULT_PORT + lcore_id);
 		udp_hdr->dgram_len = rte_cpu_to_be_16(sizeof *udp_hdr + sizeof *lf_hdr + ipv4_total_length0);
-		udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, /* ol_flags: */ 0);
+		udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, ol_flags);
 
 		lf_hdr = (struct lf_hdr *)(udp_hdr + 1);
 		lf_hdr->lf_pkt_type = 0;
@@ -1982,7 +1998,8 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 
 		m->l2_len = sizeof *ether_hdr1;
 		m->l3_len = sizeof *ipv4_hdr1;
-		m->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
+		m->l4_len = sizeof *udp_hdr;
+		m->ol_flags = ol_flags;
 
 		ether_hdr0 = ether_hdr1;
 	}
@@ -1990,10 +2007,17 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 #if DEPLOYMENT_AWS
 	swap_eth_addrs(m);
 #elif !DEPLOYMENT_UNIDIRECTIONAL
-	struct rte_ether_addr tx_ether_addr;
-	rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
-	(void)rte_memcpy(&ether_hdr0->s_addr, &tx_ether_addr, sizeof ether_hdr0->s_addr);
-	(void)rte_memcpy(&ether_hdr0->d_addr, &peer.ether_addr, sizeof ether_hdr0->d_addr);
+	if (is_peer) {
+		struct rte_ether_addr tx_ether_addr;
+		rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
+		(void)rte_memcpy(&ether_hdr0->s_addr, &tx_ether_addr, sizeof ether_hdr0->s_addr);
+		(void)rte_memcpy(&ether_hdr0->d_addr, &peer.ether_addr, sizeof ether_hdr0->d_addr);
+	} else {
+		// #if LOG_PACKETS
+		printf("[%d] Peer ethernet address lookup failed.\n", lcore_id);
+		// #endif
+		return -1;
+	}
 #endif
 
 #if LOG_PACKETS
