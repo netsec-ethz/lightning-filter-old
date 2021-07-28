@@ -93,17 +93,17 @@
 #define SIMPLE_GW_FORWARD 0
 #define SIMPLE_SCION_FORWARD 1
 
-#define ENABLE_KEY_MANAGEMENT 0
+#define ENABLE_KEY_MANAGEMENT 1
 #define ENABLE_MEASUREMENTS 0
 #define ENABLE_DUPLICATE_FILTER 0
 #define ENABLE_RATE_LIMIT_FILTER 1
-#define LOG_DELEGATION_SECRETS 0
+#define LOG_DELEGATION_SECRETS 1
 #define LOG_PACKETS 1
 #define CHECK_PACKET_STRUCTURE 1
 
 // deployment
 #define UNIDIRECTIONAL_SETUP 0
-#define AWS_DEPLOYMENT 1
+#define AWS_DEPLOYMENT 0
 
 // logging
 #define RTE_LOGTYPE_scionfwd RTE_LOGTYPE_USER1
@@ -304,7 +304,19 @@ static struct rte_eth_conf port_conf = {
 	.rx_adv_conf = {
 		.rss_conf = { /* configuration according to NIC capability */
 			.rss_key = NULL,
-#if AWS_DEPLOYMENT
+#if UNIDIRECTIONAL_SETUP
+			.rss_hf = ETH_RSS_FRAG_IPV4
+				| ETH_RSS_NONFRAG_IPV4_TCP
+				| ETH_RSS_NONFRAG_IPV4_UDP
+				| ETH_RSS_NONFRAG_IPV4_SCTP
+				| ETH_RSS_NONFRAG_IPV4_OTHER
+				| ETH_RSS_FRAG_IPV6
+				| ETH_RSS_NONFRAG_IPV6_TCP
+				| ETH_RSS_NONFRAG_IPV6_UDP
+				| ETH_RSS_NONFRAG_IPV6_SCTP
+				| ETH_RSS_NONFRAG_IPV6_OTHER
+				| ETH_RSS_L2_PAYLOAD
+#else
 			.rss_hf = ETH_RSS_IPV4
 				| ETH_RSS_FRAG_IPV4
 				| ETH_RSS_NONFRAG_IPV4_TCP
@@ -320,18 +332,6 @@ static struct rte_eth_conf port_conf = {
 				| ETH_RSS_IPV6_EX
 				| ETH_RSS_IPV6_TCP_EX
 				| ETH_RSS_IPV6_UDP_EX
-#else
-			.rss_hf = ETH_RSS_FRAG_IPV4
-				| ETH_RSS_NONFRAG_IPV4_TCP
-				| ETH_RSS_NONFRAG_IPV4_UDP
-				| ETH_RSS_NONFRAG_IPV4_SCTP
-				| ETH_RSS_NONFRAG_IPV4_OTHER
-				| ETH_RSS_FRAG_IPV6
-				| ETH_RSS_NONFRAG_IPV6_TCP
-				| ETH_RSS_NONFRAG_IPV6_UDP
-				| ETH_RSS_NONFRAG_IPV6_SCTP
-				| ETH_RSS_NONFRAG_IPV6_OTHER
-				| ETH_RSS_L2_PAYLOAD
 #endif
 		},
 	},
@@ -550,21 +550,6 @@ static int find_peer(rte_be32_t public_addr, struct lf_config_peer *p) {
 	} else {
 		return 0;
 	}
-}
-
-static int is_backend(rte_be32_t private_addr) {
-	return find_backend(private_addr, NULL);
-}
-
-static int is_peer(rte_be32_t public_addr) {
-	return find_peer(public_addr, NULL);
-}
-
-static rte_be32_t backend_public_addr(rte_be32_t private_addr) {
-	struct lf_config_backend b;
-	int r = find_backend(private_addr, &b);
-	RTE_ASSERT(r != 0);
-	return b.public_addr;
 }
 
 static struct delegation_secret *get_delegation_secret(struct key_store_node *n, int64_t t) {
@@ -819,19 +804,9 @@ static int apply_non_auth_pkt_rate_limit_filter(
 }
 
 static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hdr0,
-	const unsigned lcore_id, struct lcore_values *lvars, int16_t state) {
-	RTE_ASSERT(sizeof *ether_hdr0 <= m->data_len);
-	RTE_ASSERT(ether_hdr0->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4));
-	struct rte_ipv4_hdr *ipv4_hdr0;
-#if CHECK_PACKET_STRUCTURE
-	if (unlikely(sizeof *ipv4_hdr0 > m->data_len - sizeof *ether_hdr0)) {
-		// #if LOG_PACKETS
-		printf("[%d] Unsupported packet: IP header exceeds first buffer segment.\n", lcore_id);
-		// #endif
-		return -1;
-	}
-#endif
-	ipv4_hdr0 = (struct rte_ipv4_hdr *)(ether_hdr0 + 1);
+	struct rte_ipv4_hdr *ipv4_hdr0, struct lf_config_backend *backend, const unsigned lcore_id,
+	struct lcore_values *lvars, int16_t state) {
+	int r;
 
 	uint16_t ipv4_total_length0 = rte_be_to_cpu_16(ipv4_hdr0->total_length);
 
@@ -1167,7 +1142,7 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 							uint64_t src_ia = rte_be_to_cpu_64(scion_addr_hdr->src_ia);
 
 							struct timeval tv_now;
-							int r = get_time(lcore_id, &tv_now);
+							r = get_time(lcore_id, &tv_now);
 							if (r != 0) {
 								RTE_ASSERT(r == -1);
 								return -1;
@@ -1217,8 +1192,21 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 	}
 
 	if (!auth_pkt) {
-		apply_non_auth_pkt_rate_limit_filter(lcore_id, state, ipv4_total_length0);
+		r = apply_non_auth_pkt_rate_limit_filter(lcore_id, state, ipv4_total_length0);
+		if (r != 0) {
+			RTE_ASSERT(r == -1);
+			return -1;
+		}
 	}
+
+#if AWS_DEPLOYMENT
+	swap_eth_addrs(m);
+#elif !UNIDIRECTIONAL_SETUP
+	struct rte_ether_addr tx_ether_addr;
+	rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
+	(void)rte_memcpy(&ether_hdr0->s_addr, &tx_ether_addr, sizeof ether_hdr0->s_addr);
+	(void)rte_memcpy(&ether_hdr0->d_addr, &backend->ether_addr, sizeof ether_hdr0->d_addr);
+#endif
 
 #if LOG_PACKETS
 	printf("[%d] Forwarding incoming packet:\n", lcore_id);
@@ -1237,26 +1225,16 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 }
 
 static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hdr0,
-	const unsigned lcore_id, struct lcore_values *lvars) {
-	RTE_ASSERT(sizeof *ether_hdr0 <= m->data_len);
-	RTE_ASSERT(ether_hdr0->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4));
+	struct rte_ipv4_hdr *ipv4_hdr0, struct lf_config_backend *backend, const unsigned lcore_id,
+	struct lcore_values *lvars) {
+	(void)backend;
+	int r;
 
-	struct rte_ipv4_hdr *ipv4_hdr0;
-#if CHECK_PACKET_STRUCTURE
-	if (unlikely(sizeof *ipv4_hdr0 > m->data_len - sizeof *ether_hdr0)) {
-		// #if LOG_PACKETS
-		printf("[%d] Unsupported packet: IP header exceeds first buffer segment.\n", lcore_id);
-		// #endif
-		return -1;
-	}
-#endif
-	ipv4_hdr0 = (struct rte_ipv4_hdr *)(ether_hdr0 + 1);
-
-	if (ipv4_hdr0->next_proto_id == IP_PROTO_ID_UDP) {
+	struct lf_config_peer peer;
+	int is_peer = find_peer(ipv4_hdr0->dst_addr, &peer);
+	if (is_peer && ipv4_hdr0->next_proto_id == IP_PROTO_ID_UDP) {
 		uint16_t ipv4_hdr_length0 =
 			(ipv4_hdr0->version_ihl & RTE_IPV4_HDR_IHL_MASK) * RTE_IPV4_IHL_MULTIPLIER;
-
-		uint16_t ipv4_total_length0 = rte_be_to_cpu_16(ipv4_hdr0->total_length);
 
 #if CHECK_PACKET_STRUCTURE
 		if (unlikely(ipv4_hdr_length0 < sizeof *ipv4_hdr0)) {
@@ -1266,6 +1244,9 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 			return -1;
 		}
 #endif
+
+		uint16_t ipv4_total_length0 = rte_be_to_cpu_16(ipv4_hdr0->total_length);
+
 #if CHECK_PACKET_STRUCTURE
 		if (unlikely(ipv4_total_length0 != m->data_len - sizeof *ether_hdr0)) {
 			// #if LOG_PACKETS
@@ -1544,7 +1525,7 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 				uint64_t dst_ia = rte_be_to_cpu_64(scion_addr_hdr->dst_ia);
 
 				struct timeval tv_now;
-				int r = get_time(lcore_id, &tv_now);
+				r = get_time(lcore_id, &tv_now);
 				if (r != 0) {
 					RTE_ASSERT(r == -1);
 					return -1;
@@ -1596,8 +1577,17 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 		}
 	}
 
+#if AWS_DEPLOYMENT
+	swap_eth_addrs(m);
+#elif !UNIDIRECTIONAL_SETUP
+	struct rte_ether_addr tx_ether_addr;
+	rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
+	(void)rte_memcpy(&ether_hdr0->s_addr, &tx_ether_addr, sizeof ether_hdr0->s_addr);
+	(void)rte_memcpy(&ether_hdr0->d_addr, &peer.ether_addr, sizeof ether_hdr0->d_addr);
+#endif
+
 #if LOG_PACKETS
-	printf("[%d] ### Forwarding outgoing packet:\n", lcore_id);
+	printf("[%d] Forwarding outgoing packet:\n", lcore_id);
 	dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
 #endif
 	uint16_t n = rte_eth_tx_buffer(
@@ -1612,58 +1602,18 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 	return 0;
 }
 
-static void scionfwd_simple_scion_forward(
-	struct rte_mbuf *m, const unsigned lcore_id, struct lcore_values *lvars, int16_t state) {
-	struct rte_ether_hdr *l2_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
-	if (l2_hdr->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
-		struct rte_ipv4_hdr *l3_hdr = (struct rte_ipv4_hdr *)(l2_hdr + 1);
-		struct lf_config_backend b;
-		int r = find_backend(l3_hdr->dst_addr, &b);
-		if (r) {
-			struct rte_ether_addr tx_ether_addr;
-			rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
-			(void)rte_memcpy(&l2_hdr->s_addr, &tx_ether_addr, sizeof l2_hdr->s_addr);
-			(void)rte_memcpy(&l2_hdr->d_addr, &b.ether_addr, sizeof l2_hdr->d_addr);
-			r = handle_inbound_scion_pkt(m, l2_hdr, lcore_id, lvars, state);
-			if (r != 0) {
-				RTE_ASSERT(r == -1);
-				/* drop packet */
-				rte_pktmbuf_free(m);
-			}
-			return;
-		}
-		r = find_backend(l3_hdr->src_addr, &b);
-		if (r) {
-			struct lf_config_peer p;
-			r = find_peer(l3_hdr->dst_addr, &p);
-			if (r) {
-				RTE_ASSERT(is_backend(l3_hdr->src_addr));
-				struct rte_ether_addr tx_ether_addr;
-				rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
-				(void)rte_memcpy(&l2_hdr->s_addr, &tx_ether_addr, sizeof l2_hdr->s_addr);
-				(void)rte_memcpy(&l2_hdr->d_addr, &p.ether_addr, sizeof l2_hdr->d_addr);
-				r = handle_outbound_scion_pkt(m, l2_hdr, lcore_id, lvars);
-				if (r != 0) {
-					RTE_ASSERT(r == -1);
-					/* drop packet */
-					rte_pktmbuf_free(m);
-				}
-				return;
-			}
-		}
-	}
-	/* drop packet */
-	rte_pktmbuf_free(m);
-}
-
 static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hdr0,
-	struct rte_ipv4_hdr *ipv4_hdr0, const unsigned lcore_id, struct lcore_values *lvars,
-	int16_t state) {
+	struct rte_ipv4_hdr *ipv4_hdr0, struct lf_config_backend *backend, const unsigned lcore_id,
+	struct lcore_values *lvars, int16_t state) {
+	int r;
+
 	uint16_t ipv4_total_length0 = rte_be_to_cpu_16(ipv4_hdr0->total_length);
 
 	bool auth_pkt = false;
 
-	if (is_peer(ipv4_hdr0->src_addr) && (ipv4_hdr0->next_proto_id == IP_PROTO_ID_UDP)) {
+	struct lf_config_peer peer;
+	int is_peer = find_peer(ipv4_hdr0->src_addr, &peer);
+	if (is_peer && (ipv4_hdr0->next_proto_id == IP_PROTO_ID_UDP)) {
 		uint16_t ipv4_hdr_length0 =
 			(ipv4_hdr0->version_ihl & RTE_IPV4_HDR_IHL_MASK) * RTE_IPV4_IHL_MULTIPLIER;
 
@@ -1713,6 +1663,8 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 
 			rte_be32_t ipv4_hdr_src_addr0 = ipv4_hdr0->src_addr;
 			rte_be32_t ipv4_hdr_dst_addr0 = ipv4_hdr0->dst_addr;
+
+			RTE_ASSERT(backend->private_addr == ipv4_hdr_dst_addr0);
 
 			uint16_t udp_dgram_length = rte_be_to_cpu_16(udp_hdr->dgram_len);
 #if CHECK_PACKET_STRUCTURE
@@ -1767,7 +1719,7 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 			}
 
 			struct timeval tv_now;
-			int r = get_time(lcore_id, &tv_now);
+			r = get_time(lcore_id, &tv_now);
 			if (r != 0) {
 				RTE_ASSERT(r == -1);
 				return -1;
@@ -1779,7 +1731,7 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 				tv_now,
 				lf_hdr->src_ia,
 				ipv4_hdr_src_addr0,
-				backend_public_addr(ipv4_hdr_dst_addr0),
+				backend->public_addr,
 				&lf_hdr->encaps_pkt_len,
 				sizeof lf_hdr->encaps_pkt_len + encaps_pkt_len + encaps_trl_len,
 				lf_hdr->encaps_pkt_chksum);
@@ -1847,15 +1799,26 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 				tcp_hdr->cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, /* ol_flags: */ 0);
 				m->ol_flags |= PKT_TX_TCP_CKSUM;
 			}
+
+			ether_hdr0 = ether_hdr1;
 		}
 	}
 
 	if (!auth_pkt) {
-		apply_non_auth_pkt_rate_limit_filter(lcore_id, state, ipv4_total_length0);
+		r = apply_non_auth_pkt_rate_limit_filter(lcore_id, state, ipv4_total_length0);
+		if (r != 0) {
+			RTE_ASSERT(r == -1);
+			return -1;
+		}
 	}
 
-#if !UNIDIRECTIONAL_SETUP
+#if AWS_DEPLOYMENT
 	swap_eth_addrs(m);
+#elif !UNIDIRECTIONAL_SETUP
+	struct rte_ether_addr tx_ether_addr;
+	rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
+	(void)rte_memcpy(&ether_hdr0->s_addr, &tx_ether_addr, sizeof ether_hdr0->s_addr);
+	(void)rte_memcpy(&ether_hdr0->d_addr, &backend->ether_addr, sizeof ether_hdr0->d_addr);
 #endif
 
 #if LOG_PACKETS
@@ -1875,10 +1838,13 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 }
 
 static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hdr0,
-	struct rte_ipv4_hdr *ipv4_hdr0, const unsigned lcore_id, struct lcore_values *lvars) {
+	struct rte_ipv4_hdr *ipv4_hdr0, struct lf_config_backend *backend, const unsigned lcore_id,
+	struct lcore_values *lvars) {
+	int r;
+
 	struct lf_config_peer peer;
-	int r = find_peer(ipv4_hdr0->dst_addr, &peer);
-	if (r) {
+	int is_peer = find_peer(ipv4_hdr0->dst_addr, &peer);
+	if (is_peer) {
 		uint16_t ipv4_total_length0 = rte_be_to_cpu_16(ipv4_hdr0->total_length);
 
 		if (unlikely(ipv4_total_length0 != m->data_len - sizeof *ether_hdr0)) {
@@ -1902,7 +1868,7 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 		RTE_ASSERT(sizeof lf_hdr->encaps_pkt_len <= UINT16_MAX);
 		if (unlikely((uint16_t)(sizeof lf_hdr->encaps_pkt_len) > UINT16_MAX - ipv4_total_length0)) {
 			// #if LOG_PACKETS
-			printf("[%d] Not yet implemented: LF packet too big to encapsulate.\n", lcore_id);
+			printf("[%d] Not yet implemented: IP packet too big to encapsulate.\n", lcore_id);
 			// #endif
 			return -1;
 		}
@@ -1912,13 +1878,16 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 
 		if (unlikely(encaps_hdr_len + encaps_trl_len > UINT16_MAX - ipv4_total_length0)) {
 			// #if LOG_PACKETS
-			printf("[%d] Not yet implemented: LF packet too big to encapsualte.\n", lcore_id);
+			printf("[%d] Not yet implemented: IP packet too big to encapsualte.\n", lcore_id);
 			// #endif
 			return -1;
 		}
 
 		rte_be32_t ipv4_hdr_src_addr0 = ipv4_hdr0->src_addr;
 		rte_be32_t ipv4_hdr_dst_addr0 = ipv4_hdr0->dst_addr;
+
+		RTE_ASSERT(backend->private_addr == ipv4_hdr_src_addr0);
+
 		rte_be64_t src_ia = config.isd_as;
 
 		ipv4_hdr0->hdr_checksum = 0;
@@ -1998,7 +1967,7 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 #endif
 		compute_chksum(lcore_id,
 			/* drkey: */ ds->key,
-			/* src_addr: */ backend_public_addr(ipv4_hdr_src_addr0),
+			/* src_addr: */ backend->public_addr,
 			/* dst_addr: */ ipv4_hdr_dst_addr0,
 			/* data: */ &lf_hdr->encaps_pkt_len,
 			/* data_len: */ sizeof lf_hdr->encaps_pkt_len + ipv4_total_length0 + encaps_trl_len,
@@ -2013,9 +1982,18 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 		m->l2_len = sizeof *ether_hdr1;
 		m->l3_len = sizeof *ipv4_hdr1;
 		m->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
+
+		ether_hdr0 = ether_hdr1;
 	}
 
+#if AWS_DEPLOYMENT
 	swap_eth_addrs(m);
+#elif !UNIDIRECTIONAL_SETUP
+	struct rte_ether_addr tx_ether_addr;
+	rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
+	(void)rte_memcpy(&ether_hdr0->s_addr, &tx_ether_addr, sizeof ether_hdr0->s_addr);
+	(void)rte_memcpy(&ether_hdr0->d_addr, &peer.ether_addr, sizeof ether_hdr0->d_addr);
+#endif
 
 #if LOG_PACKETS
 	printf("[%d] Forwarding outgoing packet:\n", lcore_id);
@@ -2035,6 +2013,8 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 
 static void scionfwd_simple_forward(
 	struct rte_mbuf *m, const unsigned lcore_id, struct lcore_values *lvars, int16_t state) {
+	int r;
+
 #if CHECK_PACKET_STRUCTURE
 	if (unlikely(m->data_len != m->pkt_len)) {
 		// #if LOG_PACKETS
@@ -2044,47 +2024,64 @@ static void scionfwd_simple_forward(
 	}
 #endif
 
-	struct rte_ether_hdr *ether_hdr0;
+	struct rte_ether_hdr *ether_hdr;
 #if CHECK_PACKET_STRUCTURE
-	if (unlikely(sizeof *ether_hdr0 > m->data_len)) {
+	if (unlikely(sizeof *ether_hdr > m->data_len)) {
 		// #if LOG_PACKETS
 		printf("[%d] Unsupported packet: Ethernet header exceeds first buffer segment.\n", lcore_id);
 		// #endif
 		goto drop_pkt;
 	}
 #endif
-	ether_hdr0 = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
+	ether_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
-	if (unlikely(ether_hdr0->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4))) {
+	if (unlikely(ether_hdr->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4))) {
 		// #if LOG_PACKETS
 		printf("[%d] Unsupported packet type: must be IPv4.\n", lcore_id);
 		// #endif
 		goto drop_pkt;
 	}
 
-	struct rte_ipv4_hdr *ipv4_hdr0;
+	struct rte_ipv4_hdr *ipv4_hdr;
 #if CHECK_PACKET_STRUCTURE
-	if (unlikely(sizeof *ipv4_hdr0 > m->data_len - sizeof *ether_hdr0)) {
+	if (unlikely(sizeof *ipv4_hdr > m->data_len - sizeof *ether_hdr)) {
 		// #if LOG_PACKETS
 		printf("[%d] Unsupported packet: IP header exceeds first buffer segment.\n", lcore_id);
 		// #endif
 		goto drop_pkt;
 	}
 #endif
-	ipv4_hdr0 = (struct rte_ipv4_hdr *)(ether_hdr0 + 1);
+	ipv4_hdr = (struct rte_ipv4_hdr *)(ether_hdr + 1);
 
-	int r;
 #if UNIDIRECTIONAL_SETUP
-	(void)is_backend;
+	(void)handle_inbound_scion_pkt;
+	(void)handle_outbound_scion_pkt;
 	(void)handle_outbound_pkt;
-	r = handle_inbound_pkt(m, ether_hdr0, ipv4_hdr0, lcore_id, lvars, state);
+	r = handle_inbound_pkt(m, ether_hdr, ipv4_hdr, lcore_id, lvars, state);
 #else
-	if (is_backend(ipv4_hdr0->dst_addr)) {
-		r = handle_inbound_pkt(m, ether_hdr0, ipv4_hdr0, lcore_id, lvars, state);
-	} else if (is_backend(ipv4_hdr0->src_addr)) {
-		r = handle_outbound_pkt(m, ether_hdr0, ipv4_hdr0, lcore_id, lvars);
+	struct lf_config_backend backend;
+	int is_backend_dst = find_backend(ipv4_hdr->dst_addr, &backend);
+	if (is_backend_dst) {
+	#if SIMPLE_SCION_FORWARD
+		(void)handle_inbound_pkt;
+		r = handle_inbound_scion_pkt(m, ether_hdr, ipv4_hdr, &backend, lcore_id, lvars, state);
+	#else
+		(void)handle_inbound_scion_pkt;
+		r = handle_inbound_pkt(m, ether_hdr, ipv4_hdr, &backend, lcore_id, lvars, state);
+	#endif
 	} else {
-		goto drop_pkt;
+		int is_backend_src = find_backend(ipv4_hdr->src_addr, &backend);
+		if (is_backend_src) {
+	#if SIMPLE_SCION_FORWARD
+			(void)handle_outbound_pkt;
+			r = handle_outbound_scion_pkt(m, ether_hdr, ipv4_hdr, &backend, lcore_id, lvars);
+	#else
+			(void)handle_outbound_scion_pkt;
+			r = handle_outbound_pkt(m, ether_hdr, ipv4_hdr, &backend, lcore_id, lvars);
+	#endif
+		} else {
+			goto drop_pkt;
+		}
 	}
 #endif
 	if (r != 0) {
@@ -2109,7 +2106,7 @@ static void scionfwd_simple_gw_forward(
 	swap_eth_addrs(m);
 
 #if LOG_PACKETS
-	printf("[%d] Forwarding outgoing packet:\n", lcore_id);
+	printf("[%d] Forwarding packet:\n", lcore_id);
 	dump_hex(lcore_id, rte_pktmbuf_mtod(m, char *), m->pkt_len);
 #endif
 	uint16_t n = rte_eth_tx_buffer(
@@ -2133,8 +2130,8 @@ static void scionfwd_simple_l2_forward(
 	if (ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
 		struct rte_ipv4_hdr *l3_hdr = (struct rte_ipv4_hdr *)(l2_hdr + 1);
 		struct lf_config_backend b;
-		int r = find_backend(l3_hdr->dst_addr, &b);
-		if (r) {
+		int is_backend = find_backend(l3_hdr->dst_addr, &b);
+		if (is_backend) {
 			struct rte_ether_addr tx_ether_addr;
 			rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
 
@@ -2155,11 +2152,11 @@ static void scionfwd_simple_l2_forward(
 #endif
 			return;
 		}
-		r = find_backend(l3_hdr->src_addr, &b);
-		if (r) {
+		is_backend = find_backend(l3_hdr->src_addr, &b);
+		if (is_backend) {
 			struct lf_config_peer p;
-			r = find_peer(l3_hdr->dst_addr, &p);
-			if (r) {
+			int is_peer = find_peer(l3_hdr->dst_addr, &p);
+			if (is_peer) {
 				struct rte_ether_addr tx_ether_addr;
 				rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
 
@@ -2298,22 +2295,14 @@ static void scionfwd_main_loop(void) {
 #if SIMPLE_L2_FORWARD
 			(void)scionfwd_simple_forward;
 			(void)scionfwd_simple_gw_forward;
-			(void)scionfwd_simple_scion_forward;
 			scionfwd_simple_l2_forward(m, lcore_id, lvars, state);
 #elif SIMPLE_GW_FORWARD
 			(void)scionfwd_simple_forward;
 			(void)scionfwd_simple_l2_forward;
-			(void)scionfwd_simple_scion_forward;
 			scionfwd_simple_gw_forward(m, lcore_id, lvars, state);
-#elif SIMPLE_SCION_FORWARD
-			(void)scionfwd_simple_forward;
-			(void)scionfwd_simple_gw_forward;
-			(void)scionfwd_simple_l2_forward;
-			scionfwd_simple_scion_forward(m, lcore_id, lvars, state);
 #else
-			(void)scionfwd_simple_gw_forward;
 			(void)scionfwd_simple_l2_forward;
-			(void)scionfwd_simple_scion_forward;
+			(void)scionfwd_simple_gw_forward;
 			scionfwd_simple_forward(m, lcore_id, lvars, state);
 #endif
 
@@ -2959,7 +2948,7 @@ static void manage_inbound_delegation_secrets(
 	for (size_t i = 0; i < d->size; i++) {
 		if (d->table[i] != NULL) {
 			struct key_dictionary_node *n = d->table[i];
-			while ((n != NULL) && (n->key !=0)) {
+			while ((n != NULL) && (n->key != 0)) {
 				struct delegation_secret *ds = get_delegation_secret(n->value, t_now);
 				if (ds == NULL) {
 					fetch_delegation_secrets(n->value, config.isd_as, n->key, t_now, min_key_validity);
@@ -2979,7 +2968,7 @@ static void manage_outbound_delegation_secrets(
 	for (size_t i = 0; i < d->size; i++) {
 		if (d->table[i] != NULL) {
 			struct key_dictionary_node *n = d->table[i];
-			while ((n != NULL) && (n->key !=0)) {
+			while ((n != NULL) && (n->key != 0)) {
 				struct delegation_secret *ds = get_delegation_secret(n->value, t_now);
 				if (ds == NULL) {
 					fetch_delegation_secrets(n->value, n->key, config.isd_as, t_now, min_key_validity);
