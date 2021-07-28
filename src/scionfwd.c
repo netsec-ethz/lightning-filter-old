@@ -102,8 +102,9 @@
 #define CHECK_PACKET_STRUCTURE 1
 
 // deployment
-#define UNIDIRECTIONAL_SETUP 0
-#define AWS_DEPLOYMENT 0
+#define DEPLOYMENT_UNIDIRECTIONAL 0
+#define DEPLOYMENT_L2 1
+#define DEPLOYMENT_AWS 0
 
 // logging
 #define RTE_LOGTYPE_scionfwd RTE_LOGTYPE_USER1
@@ -304,7 +305,7 @@ static struct rte_eth_conf port_conf = {
 	.rx_adv_conf = {
 		.rss_conf = { /* configuration according to NIC capability */
 			.rss_key = NULL,
-#if UNIDIRECTIONAL_SETUP
+#if DEPLOYMENT_UNIDIRECTIONAL
 			.rss_hf = ETH_RSS_FRAG_IPV4
 				| ETH_RSS_NONFRAG_IPV4_TCP
 				| ETH_RSS_NONFRAG_IPV4_UDP
@@ -1199,9 +1200,9 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 		}
 	}
 
-#if AWS_DEPLOYMENT
+#if DEPLOYMENT_AWS
 	swap_eth_addrs(m);
-#elif !UNIDIRECTIONAL_SETUP
+#elif !DEPLOYMENT_UNIDIRECTIONAL
 	struct rte_ether_addr tx_ether_addr;
 	rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
 	(void)rte_memcpy(&ether_hdr0->s_addr, &tx_ether_addr, sizeof ether_hdr0->s_addr);
@@ -1577,9 +1578,9 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 		}
 	}
 
-#if AWS_DEPLOYMENT
+#if DEPLOYMENT_AWS
 	swap_eth_addrs(m);
-#elif !UNIDIRECTIONAL_SETUP
+#elif !DEPLOYMENT_UNIDIRECTIONAL
 	struct rte_ether_addr tx_ether_addr;
 	rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
 	(void)rte_memcpy(&ether_hdr0->s_addr, &tx_ether_addr, sizeof ether_hdr0->s_addr);
@@ -1812,9 +1813,9 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 		}
 	}
 
-#if AWS_DEPLOYMENT
+#if DEPLOYMENT_AWS
 	swap_eth_addrs(m);
-#elif !UNIDIRECTIONAL_SETUP
+#elif !DEPLOYMENT_UNIDIRECTIONAL
 	struct rte_ether_addr tx_ether_addr;
 	rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
 	(void)rte_memcpy(&ether_hdr0->s_addr, &tx_ether_addr, sizeof ether_hdr0->s_addr);
@@ -1986,9 +1987,9 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 		ether_hdr0 = ether_hdr1;
 	}
 
-#if AWS_DEPLOYMENT
+#if DEPLOYMENT_AWS
 	swap_eth_addrs(m);
-#elif !UNIDIRECTIONAL_SETUP
+#elif !DEPLOYMENT_UNIDIRECTIONAL
 	struct rte_ether_addr tx_ether_addr;
 	rte_eth_macaddr_get(lvars->tx_bypass_port_id, &tx_ether_addr);
 	(void)rte_memcpy(&ether_hdr0->s_addr, &tx_ether_addr, sizeof ether_hdr0->s_addr);
@@ -2053,7 +2054,7 @@ static void scionfwd_simple_forward(
 #endif
 	ipv4_hdr = (struct rte_ipv4_hdr *)(ether_hdr + 1);
 
-#if UNIDIRECTIONAL_SETUP
+#if DEPLOYMENT_UNIDIRECTIONAL
 	(void)handle_inbound_scion_pkt;
 	(void)handle_outbound_scion_pkt;
 	(void)handle_outbound_pkt;
@@ -4110,7 +4111,7 @@ int main(int argc, char **argv) {
 	/* initialize tx queues */
 	printf("start initializing tx queues\n\n");
 	for (int p = 0; p < RTE_MAX_ETHPORTS; p++) {
-#if SIMPLE_L2_FORWARD || SIMPLE_SCION_FORWARD
+#if DEPLOYMENT_L2
 		port_id = p == 0 ? 1 : 0;
 #else
 		port_id = p;
