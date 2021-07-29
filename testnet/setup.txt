@@ -1,0 +1,102 @@
+Testnet Setup
+=============
+
+Reference platform: Ubuntu Server 20.04 LTS with at least 8 (virtual) CPUs (x86 or ARM), 4GB memory, and 16GB storage
+
+0. Installation
+---------------
+
+sudo apt-get update
+sudo apt-get -y upgrade
+sudo apt-get -y dist-upgrade
+sudo apt-get install -y build-essential yasm libnuma-dev libssl-dev python3-pip supervisor
+
+sudo update-alternatives --install /usr/bin/python python /usr/bin/python3 1
+
+pip3 install plumbum toml supervisor-wildcards
+
+curl -LO http://fast.dpdk.org/rel/dpdk-19.11.6.tar.xz
+echo "2119ea66cf2d1576cc37655901762fc7 dpdk-19.11.6.tar.xz" | md5sum -c
+tar xfv dpdk-19.11.6.tar.xz
+cd dpdk-stable-19.11.6/
+export RTE_SDK=$(pwd)
+make defconfig
+make
+
+sudo su
+echo "vm.nr_hugepages=64" >> /etc/sysctl.conf
+echo "kernel.randomize_va_space=0" >> /etc/sysctl.conf
+reboot
+
+cd ~
+
+On x86:
+	curl -LO https://golang.org/dl/go1.16.6.linux-amd64.tar.gz
+	echo "be333ef18b3016e9d7cb7b1ff1fdb0cac800ca0be4cf2290fe613b3d069dfe0d go1.16.6.linux-amd64.tar.gz" | sha256sum -c
+	sudo tar -C /usr/local -xzf go1.16.6.linux-amd64.tar.gz
+
+On ARM:
+	curl -LO https://golang.org/dl/go1.16.6.linux-arm64.tar.gz
+	echo "9e38047463da6daecab9017cd0599f33f84991e68263752cfab49253bbc98c30 go1.16.6.linux-arm64.tar.gz" | sha256sum -c
+	sudo tar -C /usr/local -xzf go1.16.6.linux-arm64.tar.gz
+
+echo >> .bash_profile
+echo 'export PATH=$PATH:/usr/local/go/bin' >> .bash_profile
+source ~/.bash_profile
+
+cd ~
+git clone https://github.com/netsec-ethz/scion.git
+cd scion
+go build -o ./bin/ ./go/cs/
+go build -o ./bin/ ./go/posix-router/
+go build -o ./bin/ ./go/dispatcher/
+go build -o ./bin/ ./go/sciond/
+go build -o ./bin/ ./go/scion-pki/
+
+cd ~
+git clone https://github.com/marcfrei/lightning-filter.git
+cd lightning-filter/
+git checkout marcfrei/scion_support
+
+cd ~/lightning-filter/testnet/
+go build c.go && go build s.go
+
+cd ~/lightning-filter/src
+./build.sh
+
+1. Test
+-------
+
+cd ~
+
+Make sure that the system has at leat 8 (virtual) cores:
+~/dpdk-stable-19.11.6/usertools/cpu_layout.py
+
+export SCION_BIN=/home/ubuntu/scion/bin
+
+cd ~/lightning-filter/testnet/
+
+rm -rf gen-cache/* logs
+./scion-gen-crypto.sh
+./testnet-up.sh
+
+supervisor/supervisor.sh reload
+supervisor/supervisor.sh start all
+
+In an additional session:
+sudo ip netns exec far-0 ~/lightning-filter/testnet/s -sciond 10.248.3.1:30255 -dispatcher-socket /run/shm/dispatcher/endhost1-ff00_0_111.sock -local 1-ff00:0:111,10.248.3.1:10111
+
+In an additional session:
+sudo ip netns exec far-1 ~/lightning-filter/testnet/s -sciond 10.248.6.1:30255 -dispatcher-socket /run/shm/dispatcher/endhost1-ff00_0_112.sock -local 1-ff00:0:112,10.248.6.1:10111
+
+In an additional session:
+cd ~/lightning-filter
+sudo ip netns exec near-0 src/build/app/scionfwd -c 0xff --vdev=net_tap0,remote=two --vdev=net_tap1,remote=three --file-prefix=near-0 -- -r 0x3 -x 0x3 -y 0x0 -K 1 -S 5 -E 750000 -R 10000 -D 2500000 -c testnet/lf_config_1_ff00_0_111 -s 10.248.7.1:30255
+
+In an additional session:
+cd ~/lightning-filter
+sudo ip netns exec near-1 src/build/app/scionfwd -c 0xff --vdev=net_tap0,remote=six --vdev=net_tap1,remote=seven --file-prefix=near-1 -- -r 0x3 -x 0x3 -y 0x0 -K 1 -S 5 -E 750000 -R 10000 -D 2500000 -c testnet/lf_config_1_ff00_0_112 -s 10.248.8.1:30255
+
+In an additional session:
+sudo ip netns exec far-0 ~/lightning-filter/testnet/c -sciond 10.248.3.1:30255 -dispatcher-socket /run/shm/dispatcher/endhost1-ff00_0_111.sock -local 1-ff00:0:111,10.248.3.1:0 -remote 1-ff00:0:112,10.248.6.1:10111
+sudo ip netns exec far-1 ~/lightning-filter/testnet/c -sciond 10.248.6.1:30255 -dispatcher-socket /run/shm/dispatcher/endhost1-ff00_0_112.sock -local 1-ff00:0:112,10.248.6.1:0 -remote 1-ff00:0:111,10.248.3.1:10111
