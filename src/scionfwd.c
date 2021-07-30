@@ -93,7 +93,7 @@
 #define SIMPLE_GW_FORWARD 0
 #define SIMPLE_SCION_FORWARD 1
 
-#define ENABLE_KEY_MANAGEMENT 1
+#define ENABLE_KEY_MANAGEMENT 0
 #define ENABLE_MEASUREMENTS 0
 #define ENABLE_DUPLICATE_FILTER 0
 #define ENABLE_RATE_LIMIT_FILTER 1
@@ -1201,6 +1201,7 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 	}
 
 #if DEPLOYMENT_AWS
+	(void)backend;
 	swap_eth_addrs(m);
 #elif !DEPLOYMENT_UNIDIRECTIONAL
 	struct rte_ether_addr tx_ether_addr;
@@ -1460,9 +1461,6 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 				scion_addr_hdr = (struct scion_addr_hdr *)((char *)scion_addr_hdr - ext_len);
 				scion_ext_hdr = (struct scion_ext_hdr *)((char *)scion_ext_hdr - ext_len);
 
-				uint64_t ol_flags = m->ol_flags;
-				ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
-
 				RTE_ASSERT(ext_len <= UINT16_MAX - ipv4_total_length0);
 
 				if (unlikely(ext_len > UINT16_MAX - ipv4_total_length0)) {
@@ -1476,8 +1474,15 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 				ipv4_hdr0->total_length = rte_cpu_to_be_16(ipv4_total_length0 + ext_len);
 				ipv4_hdr0->hdr_checksum = 0;
 
+				m->l2_len = sizeof *ether_hdr0;
+				m->l3_len = sizeof *ipv4_hdr0;
+				m->l4_len = sizeof *udp_hdr;
+				m->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM;
+
 				udp_hdr->dgram_len = rte_cpu_to_be_16(udp_dgram_length0 + ext_len);
-				udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr0, ol_flags);
+				udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr0, /* ol_flags: */ 0);
+
+				m->ol_flags |= PKT_TX_UDP_CKSUM;
 
 				uint16_t scion_payload_len = scion_payload_len0 + ext_len;
 
@@ -1569,11 +1574,6 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 					r = rte_pktmbuf_trim(m, l4_payload_trl_len);
 					RTE_ASSERT(r == 0);
 				}
-
-				m->l2_len = sizeof *ether_hdr0;
-				m->l3_len = sizeof *ipv4_hdr0;
-				m->l4_len = sizeof *udp_hdr;
-				m->ol_flags = ol_flags;
 			}
 		}
 	}
@@ -1792,28 +1792,24 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 
 			m->l2_len = sizeof *ether_hdr1;
 			m->l3_len = sizeof *ipv4_hdr1;
-
-			uint64_t ol_flags = m->ol_flags;
 			m->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM;
 
 			if (ipv4_hdr1->next_proto_id == IP_PROTO_ID_UDP) {
 				struct rte_udp_hdr *udp_hdr;
 				RTE_ASSERT(sizeof *udp_hdr <= m->data_len - sizeof *ether_hdr1 - sizeof *ipv4_hdr1);
 				udp_hdr = (struct rte_udp_hdr *)(ipv4_hdr1 + 1);
-				ol_flags |= PKT_TX_UDP_CKSUM;
 				m->l4_len = sizeof *udp_hdr;
-				m->ol_flags = ol_flags;
-				udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, ol_flags);
+				udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, /* ol_flags: */ 0);
+				m->ol_flags |= PKT_TX_UDP_CKSUM;
 			} else if (ipv4_hdr1->next_proto_id == IP_PROTO_ID_TCP) {
 				struct rte_tcp_hdr *tcp_hdr;
 				RTE_ASSERT(sizeof *tcp_hdr <= m->data_len - sizeof *ether_hdr1 - sizeof *ipv4_hdr1);
 				tcp_hdr = (struct rte_tcp_hdr *)(ipv4_hdr1 + 1);
-				ol_flags |= PKT_TX_TCP_CKSUM;
 				m->l4_len = sizeof *tcp_hdr;
-				m->ol_flags = ol_flags;
-				tcp_hdr->cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, ol_flags);
+				tcp_hdr->cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, /* ol_flags: */ 0);
+				m->ol_flags |= PKT_TX_TCP_CKSUM;
 			}
-			
+
 			ether_hdr0 = ether_hdr1;
 		}
 	}
@@ -1917,9 +1913,6 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 
 		RTE_ASSERT(p == (char *)ether_hdr1);
 
-		uint64_t ol_flags = m->ol_flags;
-		ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
-
 		ipv4_hdr1 = (struct rte_ipv4_hdr *)(ether_hdr1 + 1);
 		ipv4_hdr1->version_ihl = (IPV4_VERSION << 4) | (sizeof *ipv4_hdr1) / RTE_IPV4_IHL_MULTIPLIER;
 		ipv4_hdr1->type_of_service = 0;
@@ -1932,11 +1925,17 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 		ipv4_hdr1->src_addr = ipv4_hdr_src_addr0;
 		ipv4_hdr1->dst_addr = ipv4_hdr_dst_addr0;
 
+		m->l2_len = sizeof *ether_hdr1;
+		m->l3_len = sizeof *ipv4_hdr1;
+		m->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM;
+
 		udp_hdr = (struct rte_udp_hdr *)(ipv4_hdr1 + 1);
 		udp_hdr->src_port = rte_cpu_to_be_16(LF_DEFAULT_PORT + lcore_id);
 		udp_hdr->dst_port = rte_cpu_to_be_16(LF_DEFAULT_PORT + lcore_id);
 		udp_hdr->dgram_len = rte_cpu_to_be_16(sizeof *udp_hdr + sizeof *lf_hdr + ipv4_total_length0);
-		udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, ol_flags);
+		m->l4_len = sizeof *udp_hdr;
+		udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr1, /* ol_flags: */ 0);
+		m->ol_flags |= PKT_TX_UDP_CKSUM;
 
 		lf_hdr = (struct lf_hdr *)(udp_hdr + 1);
 		lf_hdr->lf_pkt_type = 0;
@@ -1995,11 +1994,6 @@ static int handle_outbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_h
 			r = rte_pktmbuf_trim(m, encaps_trl_len);
 			RTE_ASSERT(r == 0);
 		}
-
-		m->l2_len = sizeof *ether_hdr1;
-		m->l3_len = sizeof *ipv4_hdr1;
-		m->l4_len = sizeof *udp_hdr;
-		m->ol_flags = ol_flags;
 
 		ether_hdr0 = ether_hdr1;
 	}
@@ -3591,6 +3585,7 @@ static int scionfwd_parse_args(int argc, char **argv) {
 
 			case 'c':
 				if (strlen(optarg) >= sizeof scionfwd_config) {
+					printf("invalid config file name\n");
 					scionfwd_usage(prgname);
 					return -1;
 				}
@@ -3599,6 +3594,7 @@ static int scionfwd_parse_args(int argc, char **argv) {
 
 			case 's':
 				if (strlen(optarg) >= sizeof sciond_addr) {
+					printf("invalid sciond address\n");
 					scionfwd_usage(prgname);
 					return -1;
 				}
@@ -3609,6 +3605,7 @@ static int scionfwd_parse_args(int argc, char **argv) {
 				break;
 
 			default:
+				printf("unknown option: %c\n", (char)opt);
 				scionfwd_usage(prgname);
 				return -1;
 		}
