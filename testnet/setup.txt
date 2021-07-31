@@ -9,7 +9,7 @@ Reference platform: Ubuntu Server 20.04 LTS with at least 8 (virtual) CPUs (x86 
 sudo apt-get update
 sudo apt-get -y upgrade
 sudo apt-get -y dist-upgrade
-sudo apt-get install -y build-essential yasm libnuma-dev libssl-dev python3-pip supervisor
+sudo apt-get install -y build-essential yasm libnuma-dev libssl-dev python3-pip supervisor net-tools
 
 sudo update-alternatives --install /usr/bin/python python /usr/bin/python3 1
 
