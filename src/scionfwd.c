@@ -113,9 +113,10 @@
 // See https://github.com/scionproto/scion/wiki/Default-port-ranges
 #define SCION_BR_DEFAULT_PORT_LO 30042
 #define SCION_BR_DEFAULT_PORT_HI 30051
+#define SCION_BR_SCIONLAB_PORT_LO 30001
+#define SCION_BR_SCIONLAB_PORT_HI 30040
 #define SCION_BR_TESTNET_PORT_0 31014
 #define SCION_BR_TESTNET_PORT_1 31020
-#define SCION_BR_TESTNET_PORT_2 30001
 
 // Lightning Filter Port
 #define LF_DEFAULT_PORT 49149
@@ -1277,8 +1278,9 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 
 		uint16_t udp_dst_port = rte_be_to_cpu_16(udp_hdr->dst_port);
 		if (((SCION_BR_DEFAULT_PORT_LO <= udp_dst_port) && (udp_dst_port <= SCION_BR_DEFAULT_PORT_HI))
-				|| (udp_dst_port == SCION_BR_TESTNET_PORT_0) || (udp_dst_port == SCION_BR_TESTNET_PORT_1)
-				|| (udp_dst_port == SCION_BR_TESTNET_PORT_2))
+				|| ((SCION_BR_SCIONLAB_PORT_LO <= udp_dst_port)
+						&& (udp_dst_port <= SCION_BR_SCIONLAB_PORT_HI))
+				|| (udp_dst_port == SCION_BR_TESTNET_PORT_0) || (udp_dst_port == SCION_BR_TESTNET_PORT_1))
 		{
 			uint16_t udp_dgram_length0 = rte_be_to_cpu_16(udp_hdr->dgram_len);
 #if CHECK_PACKET_STRUCTURE
