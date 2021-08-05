@@ -1,0 +1,279 @@
+AWS Setup
+==========
+
+Preliminary notes on how to set up a simple testnet on AWS.
+
+
+0. VPC Structure
+----------------
+
+Set up a VPC with three subnets and ingress routing as described in [1]:
+
+              +-----+
+              | IGW |
+              +-----+
+                 |
+         +-------+-------+
+         |               |
++--------|---------------|----+
+| SN2    |               |    |
+|     +-----+         +-----+ |
+|     | LF0 |         | LF1 | |
+|     +-----+         +-----+ |
++--------|---------------|----+
+				 |	             |
++--------|----+ +--------|----+
+| SN0    |    | | SN1    |    |
+|     +-----+ | |     +-----+ |
+|     | EH0 | | |     | EH1 | |
+|     +-----+ | |     +-----+ |
++-------------+ +-------------+
+
+IGW: Internet Gateway
+SN: Subnet
+EH: End Host
+LF: Lightning Filter
+
+Create secondary elastic network interfaces that will be attached to LF0 and LF1 (see sections 1.1 and 1.2.1 below). Make sure that the routing table entries from IGW to SN0 and SN1 target the secondary network interfaces for LF0 and LF1, respectively. The routing tables for SN0 and SN1 must also contain entries that route the destination 0.0.0.0/0 to the secondary network interface for the specific LF in front of them.
+
+
+1. Setup and Configuration of LF0 and LF1:
+------------------------------------------
+
+
+1.1 Instance Type:
+------------------
+
+c5n.18xlarge with Ubuntu Server 20.04 LTS and 8 GB of storage and a secondary elastic network interface (which will be used via VPC ingress routing for DPDK-based networking).
+
+
+1.2 Software Setup:
+-------------------
+
+
+1.2.1 Enable Secondary Network Interface on Ubuntu:
+---------------------------------------------------
+
+Get secondary network interface IP address from tab 'Networking' for the given LF instance, e.g., 172.31.1.240.
+
+Add netplan configuration file `/etc/netplan/51-ens6.yaml`:
+
+```
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    ens6:
+      addresses:
+        - 172.31.1.240/20
+      dhcp4: no
+      mtu: 9001
+      routes:
+       - to: 0.0.0.0/0
+         via: 172.31.0.1 # Default gateway
+         table: 1000
+       - to: 172.31.1.240
+         via: 0.0.0.0
+         scope: link
+         table: 1000
+      routing-policy:
+        - from: 172.31.1.240
+          table: 1000
+```
+
+Apply netplan configuration file:
+
+```
+sudo netplan --debug apply
+```
+
+See also [2].
+
+
+1.2.2 Install additional OS and Python Packages:
+------------------------------------------------
+
+```
+sudo apt-get update
+sudo apt-get -y upgrade
+sudo apt-get -y dist-upgrade
+sudo apt-get install -y build-essential yasm libnuma-dev libssl-dev python3-pip supervisor net-tools
+
+sudo update-alternatives --install /usr/bin/python python /usr/bin/python3 1
+
+pip3 install plumbum toml supervisor-wildcards
+```
+
+
+1.2.3 Install DPDK:
+-------------------
+
+```
+cd ~
+
+curl -LO http://fast.dpdk.org/rel/dpdk-19.11.6.tar.xz
+echo "2119ea66cf2d1576cc37655901762fc7 dpdk-19.11.6.tar.xz" | md5sum -c
+tar xfv dpdk-19.11.6.tar.xz
+cd dpdk-stable-19.11.6/
+export RTE_SDK=$(pwd)
+make defconfig
+make
+
+sudo su
+echo "vm.nr_hugepages=4096" >> /etc/sysctl.conf
+echo "kernel.randomize_va_space=0" >> /etc/sysctl.conf
+reboot
+```
+
+
+1.2.4 Install Go:
+-----------------
+
+```
+cd ~
+
+curl -LO https://golang.org/dl/go1.16.6.linux-amd64.tar.gz
+echo "be333ef18b3016e9d7cb7b1ff1fdb0cac800ca0be4cf2290fe613b3d069dfe0d go1.16.6.linux-amd64.tar.gz" | sha256sum -c
+sudo tar -C /usr/local -xzf go1.16.6.linux-amd64.tar.gz
+
+echo >> .bash_profile
+echo 'export PATH=$PATH:/usr/local/go/bin' >> .bash_profile
+source ~/.bash_profile
+```
+
+
+1.2.5 Install SCION:
+--------------------
+
+Install and configure a separate SCIONLab AS on each LF node as described in [3]. For simplicity, attach user AS via VPN to an attachment point in SCIONLab.
+
+To enable DRKey management in SCION see [4]. To make the DRKey test setup a little more "interesting" set `epoch_duration = "30s"`. And add the host's local IP address to the protocol `piskes` in the section `[drkey.delegation]` of the CS configuration. This will be needed as the LF host is reconfigured to support separate end hosts in section 3 of this document.
+
+LF0 and EH0 will be part of one SCIONLab AS while LF1 together with EH1 will form a second SCIONLab user AS.
+
+
+1.2.6 Install Lightning Filter:
+-------------------------------
+
+```
+cd ~
+git clone https://github.com/marcfrei/lightning-filter.git
+cd lightning-filter/
+git checkout marcfrei/scion_support
+```
+
+Open src/scionfwd.c, find the following build-time options, and and make sure that they are configured as follows:
+
+```
+#define SIMPLE_L2_FORWARD 0
+#define SIMPLE_GW_FORWARD 0
+#define SIMPLE_SCION_FORWARD 1
+...
+#define ENABLE_KEY_MANAGEMENT 1
+...
+#define DEPLOYMENT_UNIDIRECTIONAL 0
+#define DEPLOYMENT_L2 0
+#define DEPLOYMENT_AWS 1
+```
+
+(In later releases, these flags will be surfaced as command-line options in the build script.)
+
+As an alternative to enabling DRKey in the SCION ASes it is also possible to disable key management in Lightning Filter by setting the following build-time option:
+
+```
+#define ENABLE_KEY_MANAGEMENT 0
+```
+
+Build Lightning Filter:
+
+```
+cd ~/lightning-filter/src
+./build.sh
+```
+
+
+1.2.7 Configure Lightning Filter:
+---------------------------------
+
+After setting up protected end hosts as described in section 3, edit ~/lightning-filter/config/end_hosts.cfg on both instances LF0 and LF1 like in the following example
+
+```
+{
+   "isd_as": "<local ISD and AS number, e.g., 1-ff00:0:1>",
+   "system_limit": 9223372036854775807,
+   "peers": [
+      {
+         "isd_as": "0-0",
+         "rate_limit": 9223372036854775807
+      },
+      {
+         "isd_as": "<peer ISD and AS number, e.g., 1-ff00:0:2.",
+         "public_addr": "<internal_addr of border router, see /etc/scion/topology.json of protected end host>",
+         "rate_limit": 9223372036854775807
+      }
+   ],
+   "backends": [
+      {
+         "public_addr": "<public IP address of protected end host>",
+         "private_addr": "<private IP address of protected end host>"
+      }
+   ]
+}
+```
+
+The fact that the `public_addr` field of the peer(s) has to be configured as the internal address of the border router as configured on the protected end host (see section 3) is an artifact of the current prototype state of AWS support in LF. This will be improved in future releases.
+
+
+2. Running Lightning Filter on LF0 and LF1:
+-------------------------------------------
+
+Register secondary network interface with DPDK:
+
+```
+sudo modprobe uio
+sudo insmod ~/dpdk-stable-19.11.6/build/kmod/igb_uio.ko
+sudo ifconfig eth1 down
+sudo ~/dpdk-stable-19.11.6/usertools/dpdk-devbind.py --bind=igb_uio 0000:00:06.0
+```
+
+Run Lightning Filter:
+
+```
+sudo src/build/app/scionfwd -c 0x00003ffff00003ffff -- -r 0x1 -x 0x1 -y 0x0 -K 1 -S 5 -E 750000 -R 10000 -D 2500000
+```
+
+
+3. Setup and Configuration of EH0 and EH1:
+------------------------------------------
+
+Launch an EC2 instance in each of the protected subnets shown in section `0. VPC Structure` and configure them as SCION end hosts in their respective local ASes (hosted on the corresponding LF instance) as described in [5].
+
+Note that the topology file of the LF node hosting the AS services should be changed to bind to the local private IP of the LF host. But the topology file that is copied over to the protected end host should contain the the public IP of the LF host (variable `NODE_IP` in sections 2 and 3 of [5]). Make also sure that the field "public_addr" for peers in ~/lightning-filter/config/end_hosts.cfg on the corresponding LF is set to the public IP of the LF node, matching the entries in the topology file for the protected end host (see also section 1.2.7).
+
+As simple test applications the minimal SCION programs `~/lightning-filter/testnet/s.go` and `~/lightning-filter/testnet/c.go` can be used. Example command-lines would look like follows.
+
+Run server example app on end host EH0:
+
+```
+~/lightning-filter/testnet/s -sciond 127.0.0.1:30255 -local <local ISD-AS number>,<public IP address of EH0>:<listener port of example app on EH0>
+```
+
+Run client example app on end host EH1:
+
+```
+~/lightning-filter/testnet/c -sciond 127.0.0.1:30255 -local <local ISD-AS number>,<public IP address of EH1>:0 -remote <remote ISD-AS number>,<public IP address of EH0>:<listener port of example app on EH0>
+```
+
+
+4. References:
+--------------
+
+[1] https://aws.amazon.com/blogs/aws/new-vpc-ingress-routing-simplifying-integration-of-third-party-appliances/
+
+[2] https://aws.amazon.com/premiumsupport/knowledge-center/ec2-ubuntu-secondary-network-interface/
+
+[3] https://docs.scionlab.org/content/install/pkg.html
+
+[4] https://github.com/netsec-ethz/scion-apps/tree/master/_examples/hellodrkey#cs-configuration
+
+[5] https://docs.scionlab.org/content/config/setup_endhost.html
