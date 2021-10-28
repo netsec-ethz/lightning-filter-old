@@ -11,14 +11,14 @@ import (
 	"time"
 
 	"github.com/scionproto/scion/go/lib/addr"
+	"github.com/scionproto/scion/go/lib/daemon"
 	"github.com/scionproto/scion/go/lib/drkey"
-	"github.com/scionproto/scion/go/lib/sciond"
 )
 
 //export GetDelegationSecret
 func GetDelegationSecret(sciondAddr *C.char, srcIA, dstIA uint64, valTime int64,
 	validityNotBefore, validityNotAfter *int64, key unsafe.Pointer) int {
-	sd, err := sciond.NewService(C.GoString(sciondAddr)).Connect(context.Background())
+	sd, err := daemon.NewService(C.GoString(sciondAddr)).Connect(context.Background())
 	if err != nil {
 		return -1
 	}

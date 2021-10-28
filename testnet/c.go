@@ -7,7 +7,7 @@ import (
 	"net"
 
 	"github.com/scionproto/scion/go/lib/addr"
-	"github.com/scionproto/scion/go/lib/sciond"
+	"github.com/scionproto/scion/go/lib/daemon"
 	"github.com/scionproto/scion/go/lib/snet"
 	"github.com/scionproto/scion/go/lib/sock/reliable"
 	"github.com/scionproto/scion/go/lib/sock/reliable/reconnect"
@@ -18,7 +18,7 @@ func sendHello(sciondAddr, dispatcherSocket string, localAddr snet.UDPAddr, remo
 	var err error
 	ctx := context.Background()
 
-	sdc, err := sciond.NewService(sciondAddr).Connect(ctx)
+	sdc, err := daemon.NewService(sciondAddr).Connect(ctx)
 	if err != nil {
 		log.Fatal("Failed to create SCION connector:", err)
 	}
@@ -26,11 +26,11 @@ func sendHello(sciondAddr, dispatcherSocket string, localAddr snet.UDPAddr, remo
 		Dispatcher: reconnect.NewDispatcherService(
 			reliable.NewDispatcher(dispatcherSocket)),
 		SCMPHandler: snet.DefaultSCMPHandler{
-			RevocationHandler: sciond.RevHandler{Connector: sdc},
+			RevocationHandler: daemon.RevHandler{Connector: sdc},
 		},
 	}
 
-	ps, err := sdc.Paths(ctx, remoteAddr.IA, localAddr.IA, sciond.PathReqFlags{Refresh: true})
+	ps, err := sdc.Paths(ctx, remoteAddr.IA, localAddr.IA, daemon.PathReqFlags{Refresh: true})
 	if err != nil {
 		log.Fatal("Failed to lookup core paths: %v:", err)
 	}
