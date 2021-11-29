@@ -216,6 +216,15 @@ struct scion_packet_authenticator_opt {
 	uint16_t l4_payload_len;
 } __attribute__((__packed__));
 
+struct scion_l4_hdr {
+       uint16_t src_port;
+       uint16_t dst_port;
+       uint16_t lenght;
+       uint16_t chksum;
+} __attribute__((__packed__));
+
+
+
 /**
  * LF Header
  */
@@ -1181,7 +1190,28 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 								return -1;
 							}
 
+							/*
+							Extract scion l4 header:
+							struct scion_l4_hdr *scion_l4_hdr = (struct scion_l4_hdr *) (scion_packet_authenticator_opt + sizeof *scion_packet_authenticator_opt)
+
+							uint16_t dst_port = scion_l4_hdr->dst_port
+							*/
+							struct scion_l4_hdr *scion_l4_hdr = (struct scion_l4_hdr *) (scion_packet_authenticator_opt + 1);
+							uint16_t dst_port = rte_be_to_cpu_16(scion_l4_hdr->dst_port);
+							uint16_t src_port = rte_be_to_cpu_16(scion_l4_hdr->src_port);
+
+							dump_hex(lcore_id, scion_packet_authenticator_opt, sizeof *scion_packet_authenticator_opt);
+							printf(
+									"[%d] SCION L4 dst port %d\n",
+									lcore_id, dst_port);
+							printf(
+									"[%d] SCION L4 src port %d\n",
+									lcore_id, src_port);
+
+							dump_hex(lcore_id, scion_l4_hdr, sizeof *scion_l4_hdr);
+
 							r = apply_auth_pkt_rate_limit_filter(lcore_id, state, src_ia, ipv4_total_length0);
+							// r = apply_auth_pkt_rate_limit_filter(lcore_id, state, src_ia, dst_port, ipv4_total_length0);
 							if (r != 0) {
 								RTE_ASSERT(r == -1);
 								return -1;
