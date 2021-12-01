@@ -532,6 +532,20 @@ static void swap_eth_addrs(struct rte_mbuf *m) {
 	(void)rte_memcpy(eth->s_addr.addr_bytes, tmp, RTE_ETHER_ADDR_LEN);
 }
 
+static void parse_key(char dst_key[10], uint64_t isd_as, uint16_t dst_port){
+	//Copy isd_as || dst_port in big-endian
+	dst_key[0] = ( isd_as & 0xff00000000000000) >> 56;
+	dst_key[1] = ( isd_as & 0x00ff000000000000) >> 48;
+	dst_key[2] = ( isd_as & 0x0000ff0000000000) >> 40;
+	dst_key[3] = ( isd_as & 0x000000ff00000000) >> 32;
+	dst_key[4] = ( isd_as & 0x00000000ff000000) >> 24;
+	dst_key[5] = ( isd_as & 0x0000000000ff0000) >> 16;
+	dst_key[6] = ( isd_as & 0x000000000000ff00) >> 8;
+	dst_key[7] = ( isd_as & 0x00000000000000ff);
+	dst_key[8] = ( dst_port & 0xff00) >> 8;
+	dst_key[9] = ( dst_port & 0x00ff);
+}
+
 static int find_backend(rte_be32_t private_addr, struct lf_config_backend *b) {
 	struct lf_config_backend *x = config.backends;
 	while ((x != NULL) && (x->private_addr != private_addr)) {
@@ -739,15 +753,15 @@ static int apply_auth_pkt_rate_limit_filter(
 	unsigned lcore_id, int16_t state, uint64_t src_ia, uint16_t dst_port, uint16_t pkt_len) {
 	struct lcore_values *lcore_values = &core_vars[lcore_id];
 #if ENABLE_RATE_LIMIT_FILTER
-	char key_buf[10];
+	dictionary_flow_key flow_key;
 	dictionary_flow *lcore_dict = dos_stats[lcore_id].dos_dictionary[state];
-	parse_key(key_buf, src_ia, dst_port);
-	int r = dic_find_flow(lcore_dict, key_buf);
+	parse_key(flow_key.data, src_ia, dst_port);
+	int r = dic_find_flow(lcore_dict, &flow_key);
 	// If this port is not rate-limited specifically, account for default traffic coming from src_ia
 	// XXX(JordiSubira): At the moment, we also include here CS response traffic.
 	if (r != 1){
-		parse_key(key_buf, src_ia, 0);
-		int rr = dic_find_flow(lcore_dict, key_buf);
+		parse_key(flow_key.data, src_ia, 0);
+		int rr = dic_find_flow(lcore_dict, &flow_key);
 		RTE_ASSERT(rr == 1);
 	}
 	// Rate limit LF traffic
@@ -794,11 +808,11 @@ static int apply_auth_pkt_rate_limit_filter(
 
 static int apply_non_auth_pkt_rate_limit_filter(
 	unsigned lcore_id, int16_t state, uint16_t pkt_len) {
-	char key_buf[10];
+	dictionary_flow_key flow_key;
 	struct lcore_values *lcore_values = &core_vars[lcore_id];
 	dictionary_flow *lcore_dict = dos_stats[lcore_id].dos_dictionary[state];
-	parse_key(key_buf, 0, 0);
-	int r = dic_find_flow(lcore_dict, key_buf);
+	parse_key(flow_key.data, 0, 0);
+	int r = dic_find_flow(lcore_dict, &flow_key);
 	RTE_ASSERT(r == 1);
 	// Rate limit non-LF traffic
 	if (lcore_dict->value->sc_counter <= 0) {
@@ -3072,7 +3086,7 @@ static void init_dos(void) {
 	int initial_size = 32;
 	dos_statistic *dos_stat;
 	dos_counter *counter;
-	char key_buf[10];
+	dictionary_flow_key flow_key;
 
 	// reserve counters (have to be atomic because they are shared among all lcores)
 	rte_atomic64_t *reserve_all_even = malloc(sizeof *reserve_all_even);
@@ -3123,6 +3137,8 @@ static void init_dos(void) {
 		rte_atomic64_t *reserve_as_odd = malloc(sizeof *reserve_as_odd);
 		rte_atomic64_t *reserve_as_even = malloc(sizeof *reserve_as_even);
 
+		parse_key(flow_key.data, p->isd_as, p->dst_port);
+
 		// for each core do:
 		for (int core_id = 0; core_id < RTE_MAX_LCORE; core_id++) {
 			if (is_in_use[core_id] == false) {
@@ -3137,9 +3153,7 @@ static void init_dos(void) {
 			counter->sc_counter = 0;
 			counter->refill_rate = p->rate_limit;
 			counter->reserve = reserve_as_odd; // pointer to reserve atomic
-
-			parse_key(key_buf, p->isd_as, p->dst_port);
-			dic_add_flow(dos_stat->dos_dictionary[ODD], key_buf, counter);
+			dic_add_flow(dos_stat->dos_dictionary[ODD], &flow_key, counter);
 
 			// create dos_counter for even dictionary
 			counter = malloc(sizeof *counter);
@@ -3147,24 +3161,21 @@ static void init_dos(void) {
 			counter->sc_counter = 0;
 			counter->refill_rate = p->rate_limit;
 			counter->reserve = reserve_as_even; // pointer to reserve atomic
-			parse_key(key_buf, p->isd_as, p->dst_port);
-			dic_add_flow(dos_stat->dos_dictionary[EVEN], key_buf, counter);
+			dic_add_flow(dos_stat->dos_dictionary[EVEN], &flow_key, counter);
 
 			// create dos_counter for PREVIOUS odd dictionary
 			counter = malloc(sizeof *counter);
 			counter->secX_counter = 0;
 			counter->sc_counter = 0;
 			counter->refill_rate = p->rate_limit;
-			parse_key(key_buf, p->isd_as, p->dst_port);
-			dic_add_flow(previous_dos_stat[core_id].dos_dictionary[ODD], key_buf, counter);
+			dic_add_flow(previous_dos_stat[core_id].dos_dictionary[ODD], &flow_key, counter);
 
 			// create dos_counter for PREVIOUS even dictionary
 			counter = malloc(sizeof *counter);
 			counter->secX_counter = 0;
 			counter->sc_counter = 0;
 			counter->refill_rate = p->rate_limit;
-			parse_key(key_buf, p->isd_as, p->dst_port);
-			dic_add_flow(previous_dos_stat[core_id].dos_dictionary[EVEN], key_buf, counter);
+			dic_add_flow(previous_dos_stat[core_id].dos_dictionary[EVEN], &flow_key, counter);
 		}
 	}
 }
@@ -3304,7 +3315,7 @@ static void dos_main_loop(void) {
 				if (dict->table[i] != 0) {
 					struct keynode_flow *k = dict->table[i];
 					while (k) {
-						char* key = k->key;
+						dictionary_flow_key *key = k->key;
 						int64_t current_pool = k->counters->secX_counter; // yes this is not very nice dual-use
 						int64_t secX_count = 0;
 						int64_t sc_count = 0;

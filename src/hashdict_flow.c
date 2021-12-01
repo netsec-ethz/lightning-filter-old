@@ -10,28 +10,15 @@
 #define hash_func_flow meiyan
 
 uint64_t splitmix_flow(uint64_t x);
-struct keynode_flow *keynode_new_flow(char *key, dos_counter *value);
+struct keynode_flow *keynode_new_flow(dictionary_flow_key *key, dos_counter *value);
 void keynode_delete_flow(struct keynode_flow *node);
 void keynode_remove_flow(struct keynode_flow *node);
 void dic_reinsert_when_resizing_flow(struct dictionary_flow *dic, struct keynode_flow *k2);
 void dic_resize_flow(struct dictionary_flow *dic, int newsize);
 
-void parse_key(char *dst_key, uint64_t isd_as, uint16_t dst_port){
-	//Copy isd_as || dst_port in big-endian
-	dst_key[0] = ( isd_as & 0xff00000000000000) >> 56;
-	dst_key[1] = ( isd_as & 0x00ff000000000000) >> 48;
-	dst_key[2] = ( isd_as & 0x0000ff0000000000) >> 40;
-	dst_key[3] = ( isd_as & 0x000000ff00000000) >> 32;
-	dst_key[4] = ( isd_as & 0x00000000ff000000) >> 24;
-	dst_key[5] = ( isd_as & 0x0000000000ff0000) >> 16;
-	dst_key[6] = ( isd_as & 0x000000000000ff00) >> 8;
-	dst_key[7] = ( isd_as & 0x00000000000000ff);
-	dst_key[8] = ( dst_port & 0xff00) >> 8;
-	dst_key[9] = ( dst_port & 0x00ff);
-}
-
-static inline uint32_t meiyan(const char *key) {
-	int count = 10;
+static inline uint32_t meiyan(dictionary_flow_key *flow_key) {
+	int count = sizeof flow_key->data;
+	char *key = flow_key->data;
 	typedef uint32_t* P;
 	uint32_t h = 0x811c9dc5;
 	while (count >= 8) {
@@ -47,21 +34,24 @@ static inline uint32_t meiyan(const char *key) {
 	return h ^ (h >> 16);
 }
 
-struct keynode_flow *keynode_new_flow(char *key, dos_counter *value) {
+struct keynode_flow *keynode_new_flow(dictionary_flow_key *key, dos_counter *value) {
 	struct keynode_flow *node = malloc(sizeof *node);
 	node->next = NULL;
-	memcpy(node->key, key, 10);
+	node->key = malloc(sizeof *node->key);
+	memcpy(node->key, key->data, sizeof key->data);
 	node->counters = value;
 	return node;
 }
 
 void keynode_remove_flow(struct keynode_flow *node) {
+	free(node->key);
 	free(node);
 }
 
 void keynode_delete_flow(struct keynode_flow *node) {
 	if (node->next)
 		keynode_delete_flow(node->next);
+	free(node->key);
 	free(node);
 }
 
@@ -118,7 +108,7 @@ void dic_resize_flow(struct dictionary_flow *dic, int newsize) {
 	free(old);
 }
 
-int dic_add_flow(struct dictionary_flow *dic, void *key, dos_counter *value) {
+int dic_add_flow(struct dictionary_flow *dic, dictionary_flow_key *key, dos_counter *value) {
 	int n = hash_func_flow(key) % dic->length;
 	double f = (double)dic->count / (double)dic->length;
 	if (f > dic->growth_treshold) {
@@ -133,7 +123,7 @@ int dic_add_flow(struct dictionary_flow *dic, void *key, dos_counter *value) {
 	}
 	struct keynode_flow *k = dic->table[n];
 	while (k) {
-		if (!memcmp(k->key, key, 10)) {
+		if (!memcmp(k->key, key->data, sizeof key->data)) {
 			dic->value = k->counters;
 			return 1;
 		}
@@ -147,15 +137,14 @@ int dic_add_flow(struct dictionary_flow *dic, void *key, dos_counter *value) {
 	return 0;
 }
 
-int dic_find_flow(struct dictionary_flow *dic, void *key) {
+int dic_find_flow(struct dictionary_flow *dic, dictionary_flow_key *key) {
 	int n = hash_func_flow(key) % dic->length;
-	char *my_key = (char *)key;
 	__builtin_prefetch(dic->table[n]);
 	struct keynode_flow *k = dic->table[n];
 	if (!k)
 		return 0;
 	while (k) {
-		if (!memcmp(k->key, key, 10) ){
+		if (!memcmp(k->key, key->data, sizeof key->data) ){
 			dic->value = k->counters;
 			return 1;
 		}
@@ -164,7 +153,7 @@ int dic_find_flow(struct dictionary_flow *dic, void *key) {
 	return 0;
 }
 
-int dic_remove_flow(struct dictionary_flow *dic, void *key) {
+int dic_remove_flow(struct dictionary_flow *dic, dictionary_flow_key *key) {
 	int n = hash_func_flow(key) % dic->length;
 	__builtin_prefetch(dic->table[n]);
 	struct keynode_flow *k = dic->table[n];
@@ -172,7 +161,7 @@ int dic_remove_flow(struct dictionary_flow *dic, void *key) {
 	if (!k)
 		return 0;
 	while (k) {
-		if (!memcmp(k->key, key, 10)) {
+		if (!memcmp(k->key, key->data, sizeof key->data)) {
 			if (k->next) {
 				if (!previous) {
 					dic->table[n] = k->next;
