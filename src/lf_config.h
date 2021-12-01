@@ -14,6 +14,7 @@ struct lf_config_peer {
 	uint32_t public_addr; /* in network byte order */
 	uint64_t rate_limit;
 	uint8_t ether_addr[6];
+	uint16_t dst_port;
 };
 
 struct lf_config {

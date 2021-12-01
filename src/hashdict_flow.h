@@ -27,7 +27,7 @@ struct dos_counter {
 
 struct keynode_flow {
 	struct keynode_flow *next;
-	uint64_t key;
+	char key[10];
 	dos_counter *counters;
 } __rte_cache_aligned;
 
@@ -41,7 +41,8 @@ struct dictionary_flow {
 
 struct dictionary_flow *dic_new_flow(int initial_size);
 void dic_delete_flow(struct dictionary_flow *dic);
-int dic_add_flow(struct dictionary_flow *dic, uint64_t key, dos_counter *value);
-int dic_find_flow(struct dictionary_flow *dic, uint64_t key);
-int dic_remove_flow(struct dictionary_flow *dic, uint64_t key);
+int dic_add_flow(struct dictionary_flow *dic, void *key, dos_counter *value);
+int dic_find_flow(struct dictionary_flow *dic, void *key);
+int dic_remove_flow(struct dictionary_flow *dic, void *key);
+void parse_key(char *dst_key, uint64_t isd_as, uint16_t dst_port);
 #endif
