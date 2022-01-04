@@ -1,0 +1,59 @@
+{
+  "attributes": [],
+  "isd_as": "1-ff00:0:112",
+  "mtu": 1280,
+  "control_service": {
+    "cs1-ff00_0_112-1": {
+      "addr": "10.248.4.1:31016"
+    }
+  },
+  "discovery_service": {
+    "cs1-ff00_0_112-1": {
+      "addr": "10.248.4.1:32015"
+    }
+  },
+  "trust_material_service": {
+    "cs1-ff00_0_112-1": {
+      "addr": "10.248.4.1:32016"
+    }
+  },
+  "chain_renewal_service": {
+    "cs1-ff00_0_112-1": {
+      "addr": "10.248.4.1:32016"
+    }
+  },
+  "seg_lookup_service": {
+    "cs1-ff00_0_112-1": {
+      "addr": "10.248.4.1:32016"
+    }
+  },
+  "seg_registration_service": {
+    "cs1-ff00_0_112-1": {
+      "addr": "10.248.4.1:32016"
+    }
+  },
+  "drkey_service": {
+    "cs1-ff00_0_112-1": {
+      "addr": "10.248.4.1:32017"
+    }
+  },
+  "border_routers": {
+    "br1-ff00_0_112-1": {
+      "ctrl_addr": "10.248.5.1:31018",
+      "internal_addr": "10.248.5.1:31020",
+      "interfaces": {
+        "1": {
+          "underlay": {
+            "public": "127.0.0.7:50000",
+            "remote": "127.0.0.6:50000"
+          },
+          "bandwidth": 500,
+          "isd_as": "1-ff00:0:110",
+          "link_to": "PARENT",
+          "mtu": 1280
+        }
+      }
+    }
+  },
+  "colibri_service": {}
+}

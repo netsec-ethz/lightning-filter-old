@@ -1,0 +1,12 @@
+[dispatcher]
+id = "dispatcher1-ff00_0_112"
+application_socket = "/run/shm/dispatcher/cs1-ff00_0_112.sock"
+socket_file_mode = "0777"
+
+[metrics]
+prometheus = "[10.248.4.1]:30441"
+
+[features]
+
+[log.console]
+level = "debug"

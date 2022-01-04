@@ -1,0 +1,39 @@
+{
+	"isd_as": "1-ff00:0:112",
+	"system_limit": 9223372036854775807,
+	"peers": [
+		{
+			"isd_as": "0-0",
+			"dst_port": 0,
+			"rate_limit": 9223372036854775807
+		},
+		{
+			"isd_as": "1-ff00:0:111",
+			"public_addr": "10.248.5.1",
+			"dst_port": 32017,
+			"rate_limit": 9223372036854775807,
+			"ether_addr": "00:76:65:74:68:31"
+		},
+		{
+			"isd_as": "1-ff00:0:111",
+			"public_addr": "10.248.5.1",
+			"dst_port": 0,
+			"rate_limit": 9223372036854775807,
+			"ether_addr": "00:76:65:74:68:31"
+		},
+		{
+			"isd_as": "1-ff00:0:110",
+			"public_addr": "10.248.5.1",
+			"dst_port": 0,
+			"rate_limit": 9223372036854775807,
+			"ether_addr": "00:76:65:74:68:31"
+		}
+	],
+	"backends": [
+		{
+			"public_addr": "10.248.4.1",
+			"private_addr": "10.248.4.1",
+			"ether_addr": "00:76:65:74:68:34"
+		}
+	]
+}

@@ -1,0 +1,48 @@
+cd ~
+git clone https://github.com/JordiSubira/scion.git
+cd scion
+git checkout JordiSubira/scionlab_test_split_CS
+go build -o ./bin/ ./go/cs/
+go build -o ./bin/ ./go/daemon/
+go build -o ./bin/ ./go/dispatcher/
+go build -o ./bin/ ./go/posix-router/
+go build -o ./bin/ ./go/scion-pki/
+
+cd ~
+git clone https://github.com/JordiSubira/lightning-filter.git
+cd lightning-filter/
+git checkout JordiSubira/LF_port_filtering
+
+cd ~/lightning-filter/testnet/
+go build c.go && go build s.go
+
+cd ~/lightning-filter/src
+./build.sh
+
+cd ~
+
+Make sure that the system has at leat 8 (virtual) cores:
+~/dpdk-stable-19.11.6/usertools/cpu_layout.py
+
+export SCION_BIN=/home/ubuntu/scion/bin
+
+cd ~/lightning-filter/testnet/
+
+rm -rf gen-cache/* logs
+./scion-gen-crypto.sh
+./mynet-up.sh
+
+supervisor/supervisor.sh reload
+supervisor/supervisor.sh start all
+
+In an additional session:
+cd ~/lightning-filter
+sudo ip netns exec fw-111 src/build/app/scionfwd -c 0xff --vdev=net_tap0,remote=two-111 --vdev=net_tap1,remote=three-111 --file-prefix=fw-111 -- -r 0x3 -x 0x3 -y 0x0 -K 1 -S 5 -E 750000 -R 10000 -D 2500000 -c testnet/lf_config_1_ff00_0_111 -s 10.248.7.1:30255
+
+In an additional session:
+cd ~/lightning-filter
+sudo ip netns exec fw-112 src/build/app/scionfwd -c 0xff --vdev=net_tap0,remote=two-112 --vdev=net_tap1,remote=three-112 --file-prefix=fw-112 -- -r 0x3 -x 0x3 -y 0x0 -K 1 -S 5 -E 750000 -R 10000 -D 2500000 -c testnet/lf_config_1_ff00_0_112 -s 10.248.8.1:30255
+
+In an additional session (please, set daemon address and host addresses accordingly.)
+cd ~/scion
+go run hellodrkey/hellodrkey.go
