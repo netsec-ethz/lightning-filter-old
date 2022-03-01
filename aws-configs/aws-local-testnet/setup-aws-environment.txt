@@ -1,0 +1,255 @@
+https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
+
+curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
+
+aws --version
+
+export AWS_ACCESS_KEY_ID=<aws-access-key-id>
+export AWS_SECRET_ACCESS_KEY=<aws-secret-access-key>
+export AWS_DEFAULT_REGION=eu-west-1
+export AWS_PAGER=""
+
+1. Create VPC
+
+	VPC_ID=$(aws ec2 create-vpc --cidr-block 172.31.0.0/16 --query Vpc.VpcId --tag-specifications "ResourceType=vpc,Tags=[{Key=Name,Value=lf-testnet}]" --output text)
+	echo ${VPC_ID}
+
+	ROUTE_TABLE_ID_MAIN=$(aws ec2 describe-route-tables --query "RouteTables[?VpcId=='${VPC_ID}'].RouteTableId" --output text)
+	echo ${ROUTE_TABLE_ID_MAIN}
+	aws ec2 create-tags --resources ${ROUTE_TABLE_ID_MAIN} --tags Key=Name,Value=lf-testnet-main
+
+2. Create Subnets
+
+	aws ec2 describe-availability-zones --query "AvailabilityZones[?State=='available'].ZoneName" --output text
+
+	SUBNET_ID_LF=$(aws ec2 create-subnet --vpc-id ${VPC_ID} --cidr-block 172.31.0.0/20 --availability-zone "${AWS_DEFAULT_REGION}a" --query Subnet.SubnetId --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=lf-testnet-lf}]" --output text)
+	echo ${SUBNET_ID_LF}
+
+	SUBNET_ID_PEER_0=$(aws ec2 create-subnet --vpc-id ${VPC_ID} --cidr-block 172.31.16.0/20 --availability-zone "${AWS_DEFAULT_REGION}b" --query Subnet.SubnetId --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=lf-testnet-peer-0}]" --output text)
+	echo ${SUBNET_ID_PEER_0}
+
+	SUBNET_ID_PEER_1=$(aws ec2 create-subnet --vpc-id ${VPC_ID} --cidr-block 172.31.32.0/20 --availability-zone "${AWS_DEFAULT_REGION}c" --query Subnet.SubnetId --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=lf-testnet-peer-1}]" --output text)
+	echo ${SUBNET_ID_PEER_1}
+	
+	SUBNET_ID_BB=$(aws ec2 create-subnet --vpc-id ${VPC_ID} --cidr-block 172.31.48.0/20 --availability-zone "${AWS_DEFAULT_REGION}a" --query Subnet.SubnetId --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=lf-testnet-bb}]" --output text)
+	echo ${SUBNET_ID_BB}
+
+3. Create Internet Gateway
+
+	INTERNET_GATEWAY_ID=$(aws ec2 create-internet-gateway --query InternetGateway.InternetGatewayId --tag-specifications "ResourceType=internet-gateway,Tags=[{Key=Name,Value=lf-testnet}]" --output text)
+	echo ${INTERNET_GATEWAY_ID}
+	aws ec2 attach-internet-gateway --vpc-id ${VPC_ID} --internet-gateway-id ${INTERNET_GATEWAY_ID}
+
+4. Create Routes
+	ROUTE_TABLE_ID_INTERNET_GATEWAY=$(aws ec2 create-route-table --vpc-id ${VPC_ID} --query "RouteTable.RouteTableId" --tag-specifications "ResourceType=route-table,Tags=[{Key=Name,Value=lf-testnet-igw}]" --output text)
+	echo ${ROUTE_TABLE_ID_INTERNET_GATEWAY}
+	aws ec2 associate-route-table --route-table-id ${ROUTE_TABLE_ID_INTERNET_GATEWAY} --gateway-id ${INTERNET_GATEWAY_ID}
+	
+	ROUTE_TABLE_ID_BB=$(aws ec2 create-route-table --vpc-id ${VPC_ID} --query "RouteTable.RouteTableId" --tag-specifications "ResourceType=route-table,Tags=[{Key=Name,Value=lf-testnet-bb}]" --output text)
+	echo ${ROUTE_TABLE_ID_BB}
+	aws ec2 associate-route-table --route-table-id ${ROUTE_TABLE_ID_BB} --subnet-id ${SUBNET_ID_BB}
+
+
+	ROUTE_TABLE_ID_PEER_0=$(aws ec2 create-route-table --vpc-id ${VPC_ID} --query "RouteTable.RouteTableId" --tag-specifications "ResourceType=route-table,Tags=[{Key=Name,Value=lf-testnet-peer-0}]" --output text)
+	echo ${ROUTE_TABLE_ID_PEER_0}
+	aws ec2 associate-route-table --route-table-id ${ROUTE_TABLE_ID_PEER_0} --subnet-id ${SUBNET_ID_PEER_0}
+
+	ROUTE_TABLE_ID_PEER_1=$(aws ec2 create-route-table --vpc-id ${VPC_ID} --query "RouteTable.RouteTableId" --tag-specifications "ResourceType=route-table,Tags=[{Key=Name,Value=lf-testnet-peer-1}]" --output text)
+	echo ${ROUTE_TABLE_ID_PEER_1}
+	aws ec2 associate-route-table --route-table-id ${ROUTE_TABLE_ID_PEER_1} --subnet-id ${SUBNET_ID_PEER_1}
+
+	aws ec2 create-route --route-table-id ${ROUTE_TABLE_ID_MAIN} --destination-cidr-block 0.0.0.0/0 --gateway-id ${INTERNET_GATEWAY_ID}
+	aws ec2 create-route --route-table-id ${ROUTE_TABLE_ID_BB} --destination-cidr-block 0.0.0.0/0 --gateway-id ${INTERNET_GATEWAY_ID}
+	aws ec2 create-route --route-table-id ${ROUTE_TABLE_ID_PEER_0} --destination-cidr-block 0.0.0.0/0 --gateway-id ${INTERNET_GATEWAY_ID}
+	aws ec2 create-route --route-table-id ${ROUTE_TABLE_ID_PEER_1} --destination-cidr-block 0.0.0.0/0 --gateway-id ${INTERNET_GATEWAY_ID}
+
+5. Create Elastic IPs
+	ELASTIC_IP_ID_BB=$(aws ec2 allocate-address --query "AllocationId"  --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=lf-testnet-bb}]" --output text)
+	echo ${ELASTIC_IP_ID_BB}
+
+	ELASTIC_IP_ID_PEER_0=$(aws ec2 allocate-address --query "AllocationId"  --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=lf-testnet-peer-0}]" --output text)
+	echo ${ELASTIC_IP_ID_PEER_0}
+
+	ELASTIC_IP_ID_PEER_1=$(aws ec2 allocate-address --query "AllocationId"  --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=lf-testnet-peer-1}]" --output text)
+	echo ${ELASTIC_IP_ID_PEER_1}
+
+	ELASTIC_IP_ID_LF_0=$(aws ec2 allocate-address --query "AllocationId"  --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=lf-testnet-lf-0}]" --output text)
+	echo ${ELASTIC_IP_ID_LF_0}
+
+	ELASTIC_IP_ID_LF_1=$(aws ec2 allocate-address --query "AllocationId"  --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=lf-testnet-lf-1}]" --output text)
+	echo ${ELASTIC_IP_ID_LF_1}
+
+6. Create Security Group
+
+SECURITY_GROUP_ID=$(aws ec2 create-security-group --group-name lf-testnet --description "Allow all traffic" --vpc-id ${VPC_ID} --query "GroupId" --output text)
+echo ${SECURITY_GROUP_ID}
+
+aws ec2 authorize-security-group-ingress --group-id ${SECURITY_GROUP_ID} --protocol all --port 0-65535 --cidr 0.0.0.0/0
+
+7. Create Key Pair
+
+aws ec2 create-key-pair --key-name lf-testnet --query "KeyMaterial" --output text > lf-testnet-privkey.pem
+
+openssl rsa -in lf-testnet-privkey.pem -pubout -out lf-testnet-pubkey.pem
+chmod 400 lf-testnet-privkey.pem
+
+8. Create Instances
+
+aws ec2 run-instances --image-id ami-08ca3fed11864d6bb --count 1 --instance-type m6i.4xlarge --key-name lf-testnet --security-group-ids ${SECURITY_GROUP_ID} --subnet-id ${SUBNET_ID_LF} --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=lf-testnet-jordi-lf-0}]"
+INSTANCE_ID_LF_0=$(aws ec2 describe-instances --query 'Reservations[].Instances[].[InstanceId]' --filters "Name=tag:Name,Values=lf-testnet-jordi-lf-0" --output text)
+echo ${INSTANCE_ID_LF_0}
+aws ec2 modify-instance-attribute --instance-id ${INSTANCE_ID_LF_0} --no-source-dest-check
+aws ec2 associate-address --instance-id ${INSTANCE_ID_LF_0} --allocation-id ${ELASTIC_IP_ID_LF_0}
+
+aws ec2 run-instances --image-id ami-08ca3fed11864d6bb --count 1 --instance-type m6i.4xlarge --key-name lf-testnet --security-group-ids ${SECURITY_GROUP_ID} --subnet-id ${SUBNET_ID_LF} --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=lf-testnet-jordi-lf-1}]"
+INSTANCE_ID_LF_1=$(aws ec2 describe-instances --query 'Reservations[].Instances[].[InstanceId]' --filters "Name=tag:Name,Values=lf-testnet-jordi-lf-1" --output text)
+echo ${INSTANCE_ID_LF_1}
+aws ec2 modify-instance-attribute --instance-id ${INSTANCE_ID_LF_1} --no-source-dest-check
+aws ec2 associate-address --instance-id ${INSTANCE_ID_LF_1} --allocation-id ${ELASTIC_IP_ID_LF_1}
+
+aws ec2 run-instances --image-id ami-08ca3fed11864d6bb --count 1 --instance-type m6i.2xlarge --key-name lf-testnet --security-group-ids ${SECURITY_GROUP_ID} --subnet-id ${SUBNET_ID_PEER_0} --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=lf-testnet-jordi-peer-0}]"
+INSTANCE_ID_PEER_0=$(aws ec2 describe-instances --query 'Reservations[].Instances[].[InstanceId]' --filters "Name=tag:Name,Values=lf-testnet-jordi-peer-0" --output text)
+echo ${INSTANCE_ID_PEER_0}
+aws ec2 associate-address --instance-id ${INSTANCE_ID_PEER_0} --allocation-id ${ELASTIC_IP_ID_PEER_0}
+
+aws ec2 run-instances --image-id ami-08ca3fed11864d6bb --count 1 --instance-type m6i.2xlarge --key-name lf-testnet --security-group-ids ${SECURITY_GROUP_ID} --subnet-id ${SUBNET_ID_PEER_1} --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=lf-testnet-jordi-peer-1}]"
+INSTANCE_ID_PEER_1=$(aws ec2 describe-instances --query 'Reservations[].Instances[].[InstanceId]' --filters "Name=tag:Name,Values=lf-testnet-jordi-peer-1" --output text)
+echo ${INSTANCE_ID_PEER_1}
+aws ec2 associate-address --instance-id ${INSTANCE_ID_PEER_1} --allocation-id ${ELASTIC_IP_ID_PEER_1}
+
+aws ec2 run-instances --image-id ami-08ca3fed11864d6bb --count 1 --instance-type m6i.2xlarge --key-name lf-testnet --security-group-ids ${SECURITY_GROUP_ID} --subnet-id ${SUBNET_ID_BB} --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=lf-testnet-bb}]"
+INSTANCE_ID_BB=$(aws ec2 describe-instances --query 'Reservations[].Instances[].[InstanceId]' --filters "Name=tag:Name,Values=lf-testnet-jordi-bb" --output text)
+echo ${INSTANCE_ID_BB}
+aws ec2 associate-address --instance-id ${INSTANCE_ID_BB} --allocation-id ${ELASTIC_IP_ID_BB}
+
+9. Create Additional Network Interfaces
+
+NETWORK_INTERFACE_ID_LF_0_DP=$(aws ec2 create-network-interface --query "NetworkInterface.NetworkInterfaceId" --subnet-id ${SUBNET_ID_LF} --groups ${SECURITY_GROUP_ID} --tag-specifications "ResourceType=network-interface,Tags=[{Key=Name,Value=lf-testnet-lf-0-dp}]"  --output text)
+echo ${NETWORK_INTERFACE_ID_LF_0_DP}
+aws ec2 modify-network-interface-attribute --network-interface-id ${NETWORK_INTERFACE_ID_LF_0_DP} --no-source-dest-check
+aws ec2 attach-network-interface --network-interface-id ${NETWORK_INTERFACE_ID_LF_0_DP} --instance-id ${INSTANCE_ID_LF_0} --device-index 1
+
+NETWORK_INTERFACE_ID_LF_1_DP=$(aws ec2 create-network-interface --query "NetworkInterface.NetworkInterfaceId" --subnet-id ${SUBNET_ID_LF} --groups ${SECURITY_GROUP_ID} --tag-specifications "ResourceType=network-interface,Tags=[{Key=Name,Value=lf-testnet-lf-1-dp}]"  --output text)
+echo ${NETWORK_INTERFACE_ID_LF_1_DP}
+aws ec2 modify-network-interface-attribute --network-interface-id ${NETWORK_INTERFACE_ID_LF_1_DP} --no-source-dest-check
+aws ec2 attach-network-interface --network-interface-id ${NETWORK_INTERFACE_ID_LF_1_DP} --instance-id ${INSTANCE_ID_LF_1} --device-index 1
+
+10. Create Ingress Routes
+
+(SCION control-plane traffic though LF)
+
+	aws ec2 create-route --route-table-id ${ROUTE_TABLE_ID_BB} --destination-cidr-block 172.31.16.0/20 --network-interface-id ${NETWORK_INTERFACE_ID_LF_0_DP}
+	aws ec2 create-route --route-table-id ${ROUTE_TABLE_ID_BB} --destination-cidr-block 172.31.32.0/20 --network-interface-id ${NETWORK_INTERFACE_ID_LF_1_DP}
+	
+	aws ec2 create-route --route-table-id ${ROUTE_TABLE_ID_PEER_0} --destination-cidr-block 172.31.48.0/20 --network-interface-id ${NETWORK_INTERFACE_ID_LF_0_DP}
+	aws ec2 create-route --route-table-id ${ROUTE_TABLE_ID_PEER_1} --destination-cidr-block 172.31.48.0/20 --network-interface-id ${NETWORK_INTERFACE_ID_LF_1_DP}
+-----------------------------------------
+
+(SCION control-plane traffic bypasses LF)
+
+	aws ec2 delete-route --route-table-id ${ROUTE_TABLE_ID_BB} --destination-cidr-block 172.31.16.0/20 
+	aws ec2 delete-route --route-table-id ${ROUTE_TABLE_ID_BB} --destination-cidr-block 172.31.32.0/20
+	
+	aws ec2 delete-route --route-table-id ${ROUTE_TABLE_ID_PEER_0} --destination-cidr-block 172.31.48.0/20 
+	aws ec2 delete-route --route-table-id ${ROUTE_TABLE_ID_PEER_1} --destination-cidr-block 172.31.48.0/20
+
+12. Setup Machines
+
+ELASTIC_IP_BB=$(aws ec2 describe-addresses --query 'Addresses[].[PublicIp]' --filters "Name=tag:Name,Values=lf-testnet-bb" --output text)
+echo ${ELASTIC_IP_BB}
+ELASTIC_IP_ID_LF_0=$(aws ec2 describe-addresses --query 'Addresses[].[PublicIp]' --filters "Name=tag:Name,Values=lf-testnet-lf-0" --output text)
+echo ${ELASTIC_IP_LF_0}
+ELASTIC_IP_LF_1=$(aws ec2 describe-addresses --query 'Addresses[].[PublicIp]' --filters "Name=tag:Name,Values=lf-testnet-lf-1" --output text)
+echo ${ELASTIC_IP_LF_1}
+ELASTIC_IP_PEER_0=$(aws ec2 describe-addresses --query 'Addresses[].[PublicIp]' --filters "Name=tag:Name,Values=lf-testnet-peer-0" --output text)
+echo ${ELASTIC_IP_PEER_0}
+ELASTIC_IP_PEER_1=$(aws ec2 describe-addresses --query 'Addresses[].[PublicIp]' --filters "Name=tag:Name,Values=lf-testnet-peer-1" --output text)
+echo ${ELASTIC_IP_PEER_1}
+
+PRIVATE_IP_LF_0_DP=$(aws ec2 describe-network-interfaces --query 'NetworkInterfaces[].[PrivateIpAddress]' --filters "Name=tag:Name,Values=lf-testnet-lf-0-dp" --output text)
+echo ${PRIVATE_IP_LF_0_DP}
+
+PRIVATE_IP_LF_1_DP=$(aws ec2 describe-network-interfaces --query 'NetworkInterfaces[].[PrivateIpAddress]' --filters "Name=tag:Name,Values=lf-testnet-lf-1-dp" --output text)
+echo ${PRIVATE_IP_LF_1_DP}
+
+cat ~/.ssh/id_rsa.pub | ssh -i lf-testnet-privkey.pem ubuntu@${ELASTIC_IP_LF_0} 'cat >> .ssh/authorized_keys'
+ssh ubuntu@${ELASTIC_IP_LF_0}
+sudo hostnamectl set-hostname lf-0
+exit
+
+cat ~/.ssh/id_rsa.pub | ssh -i lf-testnet-privkey.pem ubuntu@${ELASTIC_IP_LF_1} 'cat >> .ssh/authorized_keys'
+ssh ubuntu@${ELASTIC_IP_LF_1}
+sudo hostnamectl set-hostname lf-1
+exit
+
+cat ~/.ssh/id_rsa.pub | ssh -i lf-testnet-privkey.pem ubuntu@${ELASTIC_IP_PEER_0} 'cat >> .ssh/authorized_keys'
+ssh ubuntu@${ELASTIC_IP_PEER_0}
+sudo hostnamectl set-hostname peer-0
+exit
+
+cat ~/.ssh/id_rsa.pub | ssh -i lf-testnet-privkey.pem ubuntu@${ELASTIC_IP_PEER_1} 'cat >> .ssh/authorized_keys'
+ssh ubuntu@${ELASTIC_IP_PEER_1}
+sudo hostnamectl set-hostname peer-1
+exit
+
+====
+
+aws ec2 describe-instances --filters "Name=tag:Name,Values=lf-testnet-*" --query "Reservations[].Instances[].[InstanceId, State.Name, PublicIpAddress, Tags[?Key=='Name']|[0].Value]" --output text
+aws ec2 start-instances --instance-ids ...
+
+====
+
+iperf3 -B <private-ip> -s -p 30100
+
+iperf3 -B <private-ip> -c <public-ip> -p 30100 -t 15 -P 1 -u -b 750M -l 1275
+
+----
+
+bwm-ng -u bits -d
+
+sudo killall iperf3
+for i in {5000..5127}; do iperf3 -B <private-ip> -s -p ${i} & done
+
+sudo killall iperf3
+for i in {5000..5127}; do iperf3 -B <private-ip> -c <public-ip> -p ${i} -t 15 -P 1 & done
+for i in {5000..5127}; do iperf3 -B <private-ip> -c <public-ip> -p ${i} -t 15 -P 1 -u -b 750M -l 1275 & done
+
+====
+
+cd ~
+git clone https://github.com/netsec-ethz/scion.git
+cd scion
+go build -o ./bin/ ./go/cs/
+go build -o ./bin/ ./go/co/
+go build -o ./bin/ ./go/daemon/
+go build -o ./bin/ ./go/dispatcher/
+go build -o ./bin/ ./go/posix-router/
+go build -o ./bin/ ./go/scion/
+go build -o ./bin/ ./go/scion-pki/
+
+supervisor/supervisor.sh reload
+supervisor/supervisor.sh restart all
+
+====
+
+Host:
+cd lightning-filter/testnet
+scp c.go s.go go.mod ubuntu@$ELASTIC_IP_PEER_0:~/scion-test/
+scp c.go s.go go.mod  ubuntu@$ELASTIC_IP_PEER_1:~/scion-test/
+
+ELASTIC_IP_PEER_1:
+scion-test/s -sciond 127.0.0.1:30255 -local <isd-as>,<public-ip>:10111
+
+ELASTIC_IP_PEER_0:
+scion-test/c -sciond 127.0.0.1:30255 -local <isd-as>,<public-ip>:0 -remote <isd-as>,<public-ip>
+
+====
+
+Links:
+
+https://docs.aws.amazon.com/cli/latest/reference/ec2/
+https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Using_Filtering.html#Filtering_Resources_CLI
+
+

@@ -1,0 +1,255 @@
+# In LF instances
+
+1. Enable Secondary Network Interface on Ubuntu:
+---------------------------------------------------
+
+Get secondary network interface IP address from tab 'Networking' for the given LF instance, e.g., 172.31.73.122.
+
+Add netplan configuration file `/etc/netplan/51-ens6.yaml`:
+
+```
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    ens6:
+      addresses:
+        - 172.31.73.122/24
+      dhcp4: no
+      mtu: 9001
+      routes:
+       - to: 0.0.0.0/0
+         via: 172.31.73.1 # Default gateway
+         table: 1000
+       - to: 172.31.73.122
+         via: 0.0.0.0
+         scope: link
+         table: 1000
+      routing-policy:
+        - from: 172.31.73.122
+          table: 1000
+```
+
+Apply netplan configuration file:
+
+```
+sudo netplan --debug apply
+```
+
+See also [2].
+
+
+2. Install additional OS and Python Packages:
+------------------------------------------------
+
+```
+sudo apt-get update
+sudo apt-get -y upgrade
+sudo apt-get -y dist-upgrade
+sudo apt-get install -y build-essential yasm libnuma-dev libssl-dev python3-pip supervisor net-tools
+
+sudo update-alternatives --install /usr/bin/python python /usr/bin/python3 1
+
+pip3 install plumbum toml supervisor-wildcards
+```
+
+
+3. Install DPDK:
+-------------------
+
+```
+cd ~
+
+curl -LO http://fast.dpdk.org/rel/dpdk-19.11.6.tar.xz
+echo "2119ea66cf2d1576cc37655901762fc7 dpdk-19.11.6.tar.xz" | md5sum -c
+tar xfv dpdk-19.11.6.tar.xz
+cd dpdk-stable-19.11.6/
+export RTE_SDK=$(pwd)
+make defconfig
+make
+```
+
+```
+sudo su
+echo "vm.nr_hugepages=4096" >> /etc/sysctl.conf
+echo "kernel.randomize_va_space=0" >> /etc/sysctl.conf
+reboot
+```
+
+4. Install Go:
+-------------------
+
+```
+cd ~
+
+curl -LO https://go.dev/dl/go1.17.6.linux-amd64.tar.gz
+echo "231654bbf2dab3d86c1619ce799e77b03d96f9b50770297c8f4dff8836fc8ca2 go1.17.6.linux-amd64.tar.gz" | sha256sum -c
+sudo tar -C /usr/local -xzf go1.17.6.linux-amd64.tar.gz
+
+echo >> .bash_profile
+echo 'export PATH=$PATH:/usr/local/go/bin' >> .bash_profile
+source ~/.bash_profile
+```
+
+5. Download scion:
+-------------------
+
+```
+git clone https://github.com/JordiSubira/scion.git
+```
+
+6. Install LF:
+-------------------
+```
+cd ~
+git clone https://github.com/JordiSubira/lightning-filter.git
+cd lightning-filter/
+git checkout JordiSubira/LF_port_filtering
+```
+
+Open src/scionfwd.c, find the following build-time options, and and make sure that they are configured as follows:
+
+#define SIMPLE_L2_FORWARD 0
+#define SIMPLE_GW_FORWARD 0
+#define SIMPLE_SCION_FORWARD 1
+...
+#define ENABLE_KEY_MANAGEMENT 0
+...
+#define DEPLOYMENT_UNIDIRECTIONAL 0
+#define DEPLOYMENT_L2 0
+#define DEPLOYMENT_AWS 1
+
+Make sure that remote BR port range defined in scionfwd.c match the remote BR port, otherwise SCION traffic won't be encapsulated
+
+#define SCION_BR_DEFAULT_PORT_LO 30042
+#define SCION_BR_DEFAULT_PORT_HI 30051
+#define SCION_BR_SCIONLAB_PORT_LO 30001
+#define SCION_BR_SCIONLAB_PORT_HI 30040
+#define SCION_BR_TESTNET_PORT_0 31014
+#define SCION_BR_TESTNET_PORT_1 31020
+
+```
+cd ~/lightning-filter/src
+./build.sh
+```
+
+6. Configure LF:
+-------------------
+
+Config every LF (example configuration thesis-deployment/LF_config/end_hosts_110.cfg)
+```
+{
+	"isd_as": "1-ff00:0:110",
+	"system_limit": 9223372036854775807,
+	"peers": [
+		{
+			"isd_as": "0-0",
+			"rate_limit": 9223372036854775807
+		},
+        {
+                "isd_as": <remote-IA>,
+                "dst_port": <dst_port>, # 0 = any;
+                "public_addr": <private IPv4 address remote peer>,
+                "rate_limit": <bps>
+        },
+    },
+      ...
+	],
+	"backends": [
+
+		{
+			"public_addr": <private IPv4 address peer to protect>,
+			"private_addr": private IPv4 address peer to protect
+		}
+	]
+}
+```
+
+7. Running Lightning Filter on LF0 and LF1:
+-------------------------------------------
+
+Register secondary network interface with DPDK:
+
+```
+sudo modprobe uio
+sudo insmod ~/dpdk-stable-19.11.6/build/kmod/igb_uio.ko
+sudo ifconfig ens6 down
+sudo ~/dpdk-stable-19.11.6/usertools/dpdk-devbind.py --bind=igb_uio 0000:00:06.0
+```
+
+If this fails, try reinstalling DPDK as in 3.
+
+Run Lightning Filter:
+
+```
+sudo src/build/app/scionfwd -c 0xfff -- -r 0x1 -x 0x1 -y 0x0 -K 1 -S 5 -E 750000 -R 10000 -D 2500000
+```
+
+
+# In peer instances
+
+1. Install SCION:
+---------------------------------------------------
+
+```
+git clone https://github.com/JordiSubira/scion.git
+cd scion
+git checkout scionlab_split_CS
+go build -o ./bin/ ./go/cs/
+go build -o ./bin/ ./go/daemon/
+go build -o ./bin/ ./go/dispatcher/
+go build -o ./bin/ ./go/posix-router/
+go build -o ./bin/ ./go/scion-pki/
+
+rm -rf gen
+```
+
+2. Transfer gen/ configuration
+---------------------------------------------------
+
+```
+scp -r thesis_deployment/AS_110/   ubuntu@${ELASTIC_IP_BB}:~/scion/gen
+```
+
+IMPORTANT: If crypto material is out-dated the SCION won't work properly, make sure you've checked that.
+
+
+3. SIG configuration
+---------------------------------------------------
+
+Check that SIG configuration is consisten with aws-sig-config.text
+
+```
+sudo ip address add 172.16.11.1 dev lo #or any faked local-address
+```
+
+4. Run SCION
+---------------------------------------------------
+```
+supervisor/supervisor.sh stop all
+rm logs/* & rm gen-cache/*
+ps -ef | grep posix-gateway | awk -F " " '{print $2};' | xargs -n1 sudo kill -9
+
+supervisor/supervisor.sh reload
+supervisor/supervisor.sh start all
+```
+
+
+5. Try out connectivity
+----------------------------------------------------
+```
+bin/scion showpaths <remote-IA>
+```
+```
+bin/scion ping <remote-IA>,<ipv4 address> #It might not work when traffic through LF
+```
+```
+ping <remote lo address>
+```
+
+
+In PEER 0:
+iperf3 -B <lo address> -s -p 30100
+
+In PEER1-5:
+iperf3 -B <lo address> -c <peer0 lo> -p 30100 -t 15 -P 1 -u -b 750M -l 1275

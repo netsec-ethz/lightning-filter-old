@@ -1,7 +1,7 @@
 cd ~
 git clone https://github.com/JordiSubira/scion.git
 cd scion
-git checkout JordiSubira/scionlab_test_split_CS
+git checkout scionlab_split_CS
 go build -o ./bin/ ./go/cs/
 go build -o ./bin/ ./go/daemon/
 go build -o ./bin/ ./go/dispatcher/
@@ -12,9 +12,6 @@ cd ~
 git clone https://github.com/JordiSubira/lightning-filter.git
 cd lightning-filter/
 git checkout JordiSubira/LF_port_filtering
-
-cd ~/lightning-filter/testnet/
-go build c.go && go build s.go
 
 cd ~/lightning-filter/src
 ./build.sh
