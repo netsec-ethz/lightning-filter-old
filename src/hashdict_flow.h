@@ -18,6 +18,7 @@ typedef struct keynode_flow keynode_flow;
 typedef struct dos_counter dos_counter;
 typedef struct dictionary_flow_key dictionary_flow_key;
 
+// data = src_ia || dst_port
 struct dictionary_flow_key {
 	char data[10];
 };
