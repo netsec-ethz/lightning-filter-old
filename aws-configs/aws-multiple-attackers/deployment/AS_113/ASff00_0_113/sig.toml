@@ -1,0 +1,8 @@
+[gateway]
+traffic_policy_file = "/home/ubuntu/scion/multiple-gen/ASff00_0_113/sig.json"
+ctrl_addr = "172.31.70.237:30256"
+data_addr = "172.31.70.237:30056"
+probe_addr = "172.31.70.237:30856"
+
+[tunnel]
+src_ipv4 = "172.16.13.1"
