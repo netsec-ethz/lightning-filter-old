@@ -4,11 +4,20 @@
 	"peers": [
 		{
 			"isd_as": "0-0",
+			"dst_port": 0,
 			"rate_limit": 9223372036854775807
 		},
 		{
 			"isd_as": "1-ff00:0:112",
 			"public_addr": "10.248.1.1",
+			"dst_port": 10111,
+			"rate_limit": 9223372036854775807,
+			"ether_addr": "00:76:65:74:68:31"
+		},
+		{
+			"isd_as": "1-ff00:0:112",
+			"public_addr": "10.248.1.1",
+			"dst_port": 0,
 			"rate_limit": 9223372036854775807,
 			"ether_addr": "00:76:65:74:68:31"
 		}

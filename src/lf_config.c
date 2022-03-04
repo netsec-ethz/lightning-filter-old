@@ -201,6 +201,53 @@ static void reader_read_uint64(struct reader *rd, uint64_t *val) {
 	}
 }
 
+static void reader_read_uint16(struct reader *rd, uint16_t *val) {
+	assert(rd->state == READER_STATE_READING_JSON);
+	if (rd->reader.state != JSON_READER_STATE_BEGINNING_NUMBER) {
+		rd->state = READER_STATE_ERROR;
+		return;
+	}
+	*val = 0;
+	do {
+		if (rd->buffer_offset == rd->buffer_length) {
+			reader_read_file(rd);
+		}
+		if (rd->buffer_offset != rd->buffer_length) {
+			size_t i = rd->buffer_offset;
+			rd->buffer_offset += json_reader_read(&rd->reader,
+				&rd->buffer[rd->buffer_offset], rd->buffer_length - rd->buffer_offset);
+			if ((rd->reader.state == JSON_READER_STATE_READING_NUMBER)
+				|| (rd->reader.state == JSON_READER_STATE_COMPLETED_NUMBER))
+			{
+				size_t j = rd->buffer_offset;
+				while (i != j) {
+					char x = rd->buffer[i];
+					if (('0' <= x) && (x <= '9')) {
+						x = x - '0';
+						if (*val <= (UINT16_MAX - x) / 10) {
+							*val = 10 * *val + x;
+						} else {
+							rd->state = READER_STATE_ERROR;
+							return;
+						}
+					} else {
+						rd->state = READER_STATE_ERROR;
+						return;
+					}
+					i++;
+				}
+			}
+		}
+	} while ((rd->state == READER_STATE_READING_JSON)
+		&& (rd->reader.state == JSON_READER_STATE_READING_NUMBER));
+	if (rd->state != READER_STATE_ERROR) {
+		if (rd->reader.state != JSON_READER_STATE_COMPLETED_NUMBER) {
+			rd->state = READER_STATE_ERROR;
+			return;
+		}
+	}
+}
+
 static void reader_read_selector(struct reader *rd, char *val, size_t length) {
 	assert(rd->state == READER_STATE_READING_JSON);
 	assert((rd->reader.state == JSON_READER_STATE_BEGINNING_OBJECT)
@@ -440,6 +487,15 @@ static void reader_read_rate_limit(struct reader *rd, uint64_t *val) {
 	reader_read_uint64(rd, val);
 }
 
+static void reader_read_dst_port(struct reader *rd, uint16_t *val) {
+	assert(rd->state == READER_STATE_READING_JSON);
+	reader_skip_forward(rd);
+	if (rd->state == READER_STATE_ERROR) {
+		return;
+	}
+	reader_read_uint16(rd, val);
+}
+
 static void reader_read_backends(struct reader *rd, struct lf_config *c) {
 	assert(rd->state == READER_STATE_READING_JSON);
 	struct lf_config_backend *b = c->backends;
@@ -557,6 +613,7 @@ static void reader_read_peers(struct reader *rd, struct lf_config *c) {
 		uint32_t public_addr = 0;
 		uint64_t rate_limit = 0;
 		uint8_t ether_addr[6] = {0x0, 0x0, 0x0, 0x0, 0x0, 0x0};
+		uint16_t dst_port = 0;
 		do {
 			char selector[256];
 			reader_read_selector(rd, selector, sizeof selector);
@@ -571,6 +628,8 @@ static void reader_read_peers(struct reader *rd, struct lf_config *c) {
 				reader_read_rate_limit(rd, &rate_limit);
 			} else if (strncmp(selector, "ether_addr", sizeof selector) == 0) {
 				reader_read_ether_addr(rd, ether_addr);
+			} else if (strncmp(selector, "dst_port", sizeof selector) == 0){
+				reader_read_dst_port(rd, &dst_port);
 			} else {
 				reader_skip_value(rd);
 			}
@@ -593,6 +652,7 @@ static void reader_read_peers(struct reader *rd, struct lf_config *c) {
 		}
 		x->next = NULL;
 		x->isd_as = isd_as;
+		x->dst_port = dst_port;
 		x->public_addr = public_addr;
 		x->rate_limit = rate_limit;
 		x->ether_addr[0] = ether_addr[0];

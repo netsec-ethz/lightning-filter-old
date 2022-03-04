@@ -172,6 +172,8 @@ static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
  * SCION Headers
  */
 
+#define SCION_PROTOCOL_DL_SL_MASK 0x33
+
 #define SCION_PROTOCOL_HBH 200
 #define SCION_PROTOCOL_E2E 201
 
@@ -214,6 +216,13 @@ struct scion_packet_authenticator_opt {
 	uint8_t reserved[2];
 	uint8_t l4_payload_chksum[BLOCK_SIZE];
 	uint16_t l4_payload_len;
+} __attribute__((__packed__));
+
+struct scion_l4_hdr {
+	uint16_t src_port;
+	uint16_t dst_port;
+	uint16_t lenght;
+	uint16_t chksum;
 } __attribute__((__packed__));
 
 /**
@@ -525,6 +534,20 @@ static void swap_eth_addrs(struct rte_mbuf *m) {
 	(void)rte_memcpy(eth->s_addr.addr_bytes, tmp, RTE_ETHER_ADDR_LEN);
 }
 
+static void parse_key(char dst_key[10], uint64_t isd_as, uint16_t dst_port){
+	//Copy isd_as || dst_port in big-endian
+	dst_key[0] = ( isd_as & 0xff00000000000000) >> 56;
+	dst_key[1] = ( isd_as & 0x00ff000000000000) >> 48;
+	dst_key[2] = ( isd_as & 0x0000ff0000000000) >> 40;
+	dst_key[3] = ( isd_as & 0x000000ff00000000) >> 32;
+	dst_key[4] = ( isd_as & 0x00000000ff000000) >> 24;
+	dst_key[5] = ( isd_as & 0x0000000000ff0000) >> 16;
+	dst_key[6] = ( isd_as & 0x000000000000ff00) >> 8;
+	dst_key[7] = ( isd_as & 0x00000000000000ff);
+	dst_key[8] = ( dst_port & 0xff00) >> 8;
+	dst_key[9] = ( dst_port & 0x00ff);
+}
+
 static int find_backend(rte_be32_t private_addr, struct lf_config_backend *b) {
 	struct lf_config_backend *x = config.backends;
 	while ((x != NULL) && (x->private_addr != private_addr)) {
@@ -729,12 +752,20 @@ static int apply_duplicate_filter(unsigned lcore_id, struct timeval tv_now, unsi
 }
 
 static int apply_auth_pkt_rate_limit_filter(
-	unsigned lcore_id, int16_t state, uint64_t src_ia, uint16_t pkt_len) {
+	unsigned lcore_id, int16_t state, uint64_t src_ia, uint16_t dst_port, uint16_t pkt_len) {
 	struct lcore_values *lcore_values = &core_vars[lcore_id];
 #if ENABLE_RATE_LIMIT_FILTER
+	dictionary_flow_key flow_key;
 	dictionary_flow *lcore_dict = dos_stats[lcore_id].dos_dictionary[state];
-	int r = dic_find_flow(lcore_dict, src_ia);
-	RTE_ASSERT(r == 1);
+	parse_key(flow_key.data, src_ia, dst_port);
+	int r = dic_find_flow(lcore_dict, &flow_key);
+	// If this port is not rate-limited specifically, account for default traffic coming from src_ia
+	// XXX(JordiSubira): At the moment, we also include here CS response traffic.
+	if (r != 1){
+		parse_key(flow_key.data, src_ia, 0);
+		int rr = dic_find_flow(lcore_dict, &flow_key);
+		RTE_ASSERT(rr == 1);
+	}
 	// Rate limit LF traffic
 	if (lcore_dict->value->secX_counter <= 0) {
 		if (lcore_dict->value->sc_counter <= 0) {
@@ -742,7 +773,7 @@ static int apply_auth_pkt_rate_limit_filter(
 			if (reserve <= 0) {
 				lcore_values->stats.as_rate_limited++;
 	#if LOG_PACKETS
-				printf("[%d] LF rate limit for %0lx exceeded.\n", lcore_id, src_ia);
+				printf("[%d] LF rate limit for ia= %0lx; dst_port=%d exceeded.\n", lcore_id, src_ia, dst_port);
 	#endif
 				return -1;
 			} else {
@@ -761,7 +792,7 @@ static int apply_auth_pkt_rate_limit_filter(
 			if (reserve <= 0) {
 				lcore_values->stats.rate_limited++;
 	#if LOG_PACKETS
-				printf("[%d] LF overall rate limit for %0lx exceeded.\n", lcore_id, src_ia);
+				printf("[%d] LF overall rate limit for ia= %0lx; dst_port=%d exceeded.\n", lcore_id, src_ia, dst_port);
 	#endif
 				return -1;
 			} else {
@@ -779,9 +810,11 @@ static int apply_auth_pkt_rate_limit_filter(
 
 static int apply_non_auth_pkt_rate_limit_filter(
 	unsigned lcore_id, int16_t state, uint16_t pkt_len) {
+	dictionary_flow_key flow_key;
 	struct lcore_values *lcore_values = &core_vars[lcore_id];
 	dictionary_flow *lcore_dict = dos_stats[lcore_id].dos_dictionary[state];
-	int r = dic_find_flow(lcore_dict, 0);
+	parse_key(flow_key.data, 0, 0);
+	int r = dic_find_flow(lcore_dict, &flow_key);
 	RTE_ASSERT(r == 1);
 	// Rate limit non-LF traffic
 	if (lcore_dict->value->sc_counter <= 0) {
@@ -910,11 +943,10 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 			}
 #endif
 
-			if (unlikely(scion_cmn_hdr->dt_dl_st_sl != 0)) {
+			if (unlikely((scion_cmn_hdr->dt_dl_st_sl & SCION_PROTOCOL_DL_SL_MASK) != 0)) {
 				// #if LOG_PACKETS
 				printf(
-					"[%d] Not yet implemented: SCION packet contains unsupported host-address "
-					"types/lengths.\n",
+					"[%d] Not yet implemented: SCION packet contains unsupported host-address lengths.\n",
 					lcore_id);
 				// #endif
 				return -1;
@@ -1181,7 +1213,13 @@ static int handle_inbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *et
 								return -1;
 							}
 
-							r = apply_auth_pkt_rate_limit_filter(lcore_id, state, src_ia, ipv4_total_length0);
+
+							// Extract the SCION dst port
+							struct scion_l4_hdr *scion_l4_hdr = (struct scion_l4_hdr *) (scion_packet_authenticator_opt + 1);
+							uint16_t dst_port = rte_be_to_cpu_16(scion_l4_hdr->dst_port);
+
+							// Apply rate limit depending on (src_ia, dst_port)
+							r = apply_auth_pkt_rate_limit_filter(lcore_id, state, src_ia, dst_port, ipv4_total_length0);
 							if (r != 0) {
 								RTE_ASSERT(r == -1);
 								return -1;
@@ -1340,11 +1378,10 @@ static int handle_outbound_scion_pkt(struct rte_mbuf *m, struct rte_ether_hdr *e
 				}
 #endif
 
-				if (unlikely(scion_cmn_hdr->dt_dl_st_sl != 0)) {
+				if (unlikely((scion_cmn_hdr->dt_dl_st_sl & SCION_PROTOCOL_DL_SL_MASK) != 0)) {
 					// #if LOG_PACKETS
 					printf(
-						"[%d] Not yet implemented: SCION packet contains unsupported host-address "
-						"types/lengths.\n",
+						"[%d] Not yet implemented: SCION packet contains unsupported host-address lengths.\n",
 						lcore_id);
 					// #endif
 					return -1;
@@ -1784,7 +1821,7 @@ static int handle_inbound_pkt(struct rte_mbuf *m, struct rte_ether_hdr *ether_hd
 			uint16_t ipv4_total_length1 = rte_be_to_cpu_16(ipv4_hdr1->total_length);
 			RTE_ASSERT(ipv4_total_length1 == m->data_len - sizeof *ether_hdr1);
 
-			r = apply_auth_pkt_rate_limit_filter(lcore_id, state, lf_hdr->src_ia, ipv4_total_length1);
+			r = apply_auth_pkt_rate_limit_filter(lcore_id, state, lf_hdr->src_ia, 0, ipv4_total_length1);
 			if (r != 0) {
 				RTE_ASSERT(r == -1);
 				return -1;
@@ -2773,6 +2810,8 @@ static struct key_store_node *new_key_store_node(struct key_store *s) {
 
 static void add_new_key_dictionary_entry(
 	struct key_dictionary *d, struct key_store *s, uint64_t key) {
+	key_dictionary_find(d, key);
+	if (d->value != NULL) return;
 	int r = key_dictionary_add(d, key, new_key_store_node(s));
 	if (r == -1) {
 		rte_exit(EXIT_FAILURE, "Registration of key store node failed.\n");
@@ -3047,6 +3086,7 @@ static void init_dos(void) {
 	int initial_size = 32;
 	dos_statistic *dos_stat;
 	dos_counter *counter;
+	dictionary_flow_key flow_key;
 
 	// reserve counters (have to be atomic because they are shared among all lcores)
 	rte_atomic64_t *reserve_all_even = malloc(sizeof *reserve_all_even);
@@ -3097,6 +3137,8 @@ static void init_dos(void) {
 		rte_atomic64_t *reserve_as_odd = malloc(sizeof *reserve_as_odd);
 		rte_atomic64_t *reserve_as_even = malloc(sizeof *reserve_as_even);
 
+		parse_key(flow_key.data, p->isd_as, p->dst_port);
+
 		// for each core do:
 		for (int core_id = 0; core_id < RTE_MAX_LCORE; core_id++) {
 			if (is_in_use[core_id] == false) {
@@ -3111,7 +3153,7 @@ static void init_dos(void) {
 			counter->sc_counter = 0;
 			counter->refill_rate = p->rate_limit;
 			counter->reserve = reserve_as_odd; // pointer to reserve atomic
-			dic_add_flow(dos_stat->dos_dictionary[ODD], p->isd_as, counter);
+			dic_add_flow(dos_stat->dos_dictionary[ODD], &flow_key, counter);
 
 			// create dos_counter for even dictionary
 			counter = malloc(sizeof *counter);
@@ -3119,21 +3161,21 @@ static void init_dos(void) {
 			counter->sc_counter = 0;
 			counter->refill_rate = p->rate_limit;
 			counter->reserve = reserve_as_even; // pointer to reserve atomic
-			dic_add_flow(dos_stat->dos_dictionary[EVEN], p->isd_as, counter);
+			dic_add_flow(dos_stat->dos_dictionary[EVEN], &flow_key, counter);
 
 			// create dos_counter for PREVIOUS odd dictionary
 			counter = malloc(sizeof *counter);
 			counter->secX_counter = 0;
 			counter->sc_counter = 0;
 			counter->refill_rate = p->rate_limit;
-			dic_add_flow(previous_dos_stat[core_id].dos_dictionary[ODD], p->isd_as, counter);
+			dic_add_flow(previous_dos_stat[core_id].dos_dictionary[ODD], &flow_key, counter);
 
 			// create dos_counter for PREVIOUS even dictionary
 			counter = malloc(sizeof *counter);
 			counter->secX_counter = 0;
 			counter->sc_counter = 0;
 			counter->refill_rate = p->rate_limit;
-			dic_add_flow(previous_dos_stat[core_id].dos_dictionary[EVEN], p->isd_as, counter);
+			dic_add_flow(previous_dos_stat[core_id].dos_dictionary[EVEN], &flow_key, counter);
 		}
 	}
 }
@@ -3273,7 +3315,7 @@ static void dos_main_loop(void) {
 				if (dict->table[i] != 0) {
 					struct keynode_flow *k = dict->table[i];
 					while (k) {
-						uint64_t key = k->key;
+						dictionary_flow_key *key = k->key;
 						int64_t current_pool = k->counters->secX_counter; // yes this is not very nice dual-use
 						int64_t secX_count = 0;
 						int64_t sc_count = 0;
