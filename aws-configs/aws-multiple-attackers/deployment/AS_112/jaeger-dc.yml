@@ -12,5 +12,5 @@ services:
     - 16686:16686
     user: 1000:1000
     volumes:
-    - /home/jordi/go/src/scion/traces:/badger:rw
+    - /home/ubuntu/go/src/scion/traces:/badger:rw
 version: '2'

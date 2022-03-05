@@ -7,5 +7,5 @@ services:
     image: prom/prometheus:v2.6.0
     network_mode: host
     volumes:
-    - /home/jordi/go/src/scion/gen:/prom-config:ro
+    - /home/ubuntu/go/src/scion/gen:/prom-config:ro
 version: '2.4'
