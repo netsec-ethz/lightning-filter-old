@@ -1,0 +1,81 @@
+# Install sig from sources in AWS
+
+1. Build go bin
+
+go build -o ./bin/ ./go/posix-gateway/
+
+2. gen/supervisor.conf
+
+Add the following entries
+
+[program:sig-1]
+autostart = false
+autorestart = false
+environment = TZ=UTC
+stdout_logfile = logs/sig-1.log
+redirect_stderr = True
+startretries = 0
+startsecs = 5
+priority = 100
+command = sudo bin/posix-gateway --config /etc/scion/sig.toml
+
+
+[group:as1-ff00_0_112]
+programs = cs1-ff00_0_112-1,sd1-ff00_0_112,sig-1
+
+3. gen/topology.json
+
+"sigs": {
+  "sig-1": {
+    "ctrl_addr": "<private primary interface IPv4 address>:30256",
+    "data_addr": "<private primary interface IPv4 address>:30056"
+  }
+
+ 4. Add fake ip address to lo interface
+
+ sudo ip address add 172.16.11.1 dev lo  # (In other EH) sudo ip address add 172.16.12.1 dev lo
+
+ 5. sig.toml
+
+ [metrics]
+prometheus = "127.0.0.1:30456"
+
+[log.console]
+level = "debug"
+
+[sciond_connection]
+# Address of the SCIOND server the client should connect to. (default 127.0.0.1:30255)
+address = "127.0.0.1:30255"
+
+[gateway]
+traffic_policy_file = "/etc/scion/sig.json"
+ctrl_addr = "<private primary interface IPv4 address>:30256"
+data_addr = "<private primary interface IPv4 address>:30056"
+probe_addr = "<private primary interface IPv4 address>:30856"
+
+[tunnel]
+src_ipv4 = "<fake ip address>" (e.g. 172.16.11.1 )
+
+6. sig.json
+
+{
+    "ASes": {
+        "1-ff00:0:111": {
+            "Nets": [
+                "<CIDR for the other fake address>" #(e.g. 172.16.12.0/24)
+            ]
+        }
+    },
+    "ConfigVersion": 9001
+}
+
+
+ 7. start AS
+
+ supervisor/supervisor.sh start all
+
+ 8. Try out ping to remote SIG
+
+ ping 172.16.12.1
+
+
